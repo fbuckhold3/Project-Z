@@ -7,6 +7,7 @@ Deploy to Posit Connect or run locally: streamlit run schedule_explorer.py
 import streamlit as st
 import random
 import collections
+import io
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -51,11 +52,13 @@ COLORS = {
     'Cards': '#FFFFB3', 'OP': '#B3FFB3', 'Clinic': '#FFFFFF', 'Jeopardy': '#FFE0B2',
     'ID': '#C8E6C9', 'Bronze': '#FFE0B2', 'Diamond': '#E1BEE7', 'Gold': '#FFF9C4',
     'ICU*': '#FFD9D9', 'Elective': '#BDD7EE',
+    'IP Other 1': '#B0BEC5', 'IP Other 2': '#90A4AE',
 }
 ABBREV = {
     'SLUH': 'SLUH', 'VA': 'VA', 'NF': 'NF', 'MICU': 'MICU', 'OP': 'OP',
     'Clinic': 'CL', 'ID': 'ID', 'Bronze': 'BRZ', 'Cards': 'CRD',
     'Diamond': 'DIA', 'Gold': 'GLD', 'Jeopardy': 'JEO', 'ICU*': 'ICU*',
+    'IP Other 1': 'IP1', 'IP Other 2': 'IP2',
 }
 # Text colors for dark backgrounds
 DARK_BG = {'SLUH', 'VA', 'NF', 'MICU'}
@@ -82,9 +85,13 @@ def build_senior(params):
         'SLUH': params['t_sluh'], 'VA': params['t_va'], 'ID': params['t_id'],
         'NF': params['t_nf'], 'MICU': params['t_micu'], 'Bronze': params['t_bronze'],
         'Cards': params['t_cards'], 'Diamond': params['t_diamond'], 'Gold': params['t_gold'],
+        'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
     }
     IP_ROTS = set(TARGETS.keys()) | {'Elective'}
     STAG_ROTS = ['MICU', 'Bronze', 'Cards']
+
+    # Remove zero-target rotations from TARGETS (but keep in IP_ROTS for consecutive-IP checking)
+    TARGETS = {k: v for k, v in TARGETS.items() if v > 0}
 
     IDEAL = {rot: (tgt * TW) / max(N, 1) for rot, tgt in TARGETS.items()}
 
@@ -153,7 +160,7 @@ def build_senior(params):
     BT['NF'] = block_types.get('NF', '2-week')
     for rot in STAG_ROTS:
         BT[rot] = block_types.get(rot, 'ABABA (3×1wk)')
-    for rot in ['Diamond', 'Gold']:
+    for rot in ['Diamond', 'Gold', 'IP Other 1', 'IP Other 2']:
         BT[rot] = block_types.get(rot, '1-week')
 
     # Identify rotations by block type
@@ -376,11 +383,12 @@ def build_intern(params):
     NF_LEN = params.get('nf_len', 2)
     JEOP_CAP = params.get('jeop_cap', 3)
 
-    ALL_IP = {'SLUH', 'VA', 'NF', 'MICU', 'Cards'}
+    ALL_IP = {'SLUH', 'VA', 'NF', 'MICU', 'Cards', 'IP Other 1', 'IP Other 2'}
     STAG = ['MICU', 'Cards']
     FULL = {
         'SLUH': params['t_sluh'], 'VA': params['t_va'],
         'NF': params['t_nf'], 'MICU': params['t_micu'], 'Cards': params['t_cards'],
+        'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
     }
 
     # Build block types dict from params
@@ -391,6 +399,8 @@ def build_intern(params):
     BT['NF'] = block_types.get('NF', '2-week')
     for rot in STAG:
         BT[rot] = block_types.get(rot, 'ABABA (3×1wk)')
+    for rot in ['IP Other 1', 'IP Other 2']:
+        BT[rot] = block_types.get(rot, '1-week')
 
     # Identify rotations by block type
     mario_kart_rots_intern = [r for r in ['SLUH', 'VA'] if BT.get(r) == 'MarioKart (3wk)']
@@ -472,14 +482,22 @@ def build_intern(params):
         residents.append({'id': f'I_pre{i:02d}', 'type': 'prelim'})
 
     positions = {r['id']: (i % 6) + 1 for i, r in enumerate(residents)}
+
+    # Remove zero-target rotations from FULL (but keep in ALL_IP for consecutive-IP checking)
+    FULL = {k: v for k, v in FULL.items() if v > 0}
+
     IDEAL = {
         'SLUH': sum(it_s) / max(N, 1), 'VA': sum(it_v) / max(N, 1),
         'NF': FULL['NF'] * TW / max(N, 1), 'MICU': FULL['MICU'] * TW / max(N, 1),
         'Cards': FULL['Cards'] * TW / max(N, 1),
     }
+    # Add IP Other rotations to IDEAL if they have targets
+    for rot in ['IP Other 1', 'IP Other 2']:
+        if rot in FULL:
+            IDEAL[rot] = FULL[rot] * TW / max(N, 1)
 
     schedule = {r['id']: [''] * TW for r in residents}
-    coverage = {rot: [0] * TW for rot in ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'Jeopardy']}
+    coverage = {rot: [0] * TW for rot in ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'IP Other 1', 'IP Other 2', 'Jeopardy']}
     rw = {r['id']: collections.Counter() for r in residents}
 
     for r in residents:
@@ -781,11 +799,72 @@ def render_schedule_html(data, level, params):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# EXCEL EXPORT
+# ═══════════════════════════════════════════════════════════════════════
+def export_to_excel(data, level, params):
+    """Export schedule data to an Excel file in memory."""
+    output = io.BytesIO()
+
+    TW = 48
+    targets = data['targets']
+
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Sheet 1: Schedule Grid
+        rows = []
+        for r in data['residents']:
+            row = {'Resident': r['id'], 'PGY': r.get('pgy', ''), 'Position': r.get('pos', '')}
+            for w in range(TW):
+                row[f'Week {w+1}'] = r['schedule'][w]
+            row['IP Weeks'] = r['ip']
+            row['OP Weeks'] = r['op']
+            row['Clinic'] = r['clinic']
+            row['Max Consec'] = r['maxConsec']
+            rows.append(row)
+        pd.DataFrame(rows).to_excel(writer, sheet_name='Schedule', index=False)
+
+        # Sheet 2: Coverage
+        cov_rows = []
+        for rot in targets:
+            row = {'Rotation': rot, 'Target': targets[rot]}
+            vals = data['coverage'].get(rot, [0] * TW)
+            for w in range(TW):
+                row[f'Week {w+1}'] = vals[w]
+            met = sum(1 for v in vals if v >= targets[rot])
+            row['Weeks Met'] = f'{met}/48'
+            cov_rows.append(row)
+        pd.DataFrame(cov_rows).to_excel(writer, sheet_name='Coverage', index=False)
+
+        # Sheet 3: Balance
+        bal_rows = []
+        for r in data['residents']:
+            row = {'Resident': r['id'], 'IP': r['ip'], 'OP': r['op'], 'Clinic': r['clinic'],
+                   'Max Consec': r['maxConsec']}
+            for rot in sorted(targets.keys()):
+                row[rot] = r['counts'].get(rot, 0)
+            bal_rows.append(row)
+        pd.DataFrame(bal_rows).to_excel(writer, sheet_name='Balance', index=False)
+
+        # Sheet 4: Parameters
+        param_rows = [{'Parameter': k, 'Value': str(v)} for k, v in sorted(params.items())]
+        pd.DataFrame(param_rows).to_excel(writer, sheet_name='Parameters', index=False)
+
+        # Format column widths
+        for sheet_name in writer.sheets:
+            ws = writer.sheets[sheet_name]
+            ws.column_dimensions['A'].width = 18
+            ws.column_dimensions['B'].width = 12
+
+    output.seek(0)
+    return output
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════
 st.sidebar.markdown("## Project Z — Schedule Explorer")
 st.sidebar.markdown("*ABC Model • Interactive Design Tool*")
 st.sidebar.divider()
+st.sidebar.caption("Adjust parameters below to regenerate the schedule in real-time. Use 'Find Best Seed' to optimize coverage.")
 
 level = st.sidebar.radio("Schedule Level", ["Senior", "Intern"], horizontal=True)
 
@@ -821,6 +900,9 @@ if level == "Senior":
     t_cards = col7.number_input("Cards", 0, 10, 2)
     t_diamond = col8.number_input("Diamond", 0, 5, 1)
     t_gold = col9.number_input("Gold", 0, 5, 1)
+    col10, col11 = st.sidebar.columns(2)
+    t_other1 = col10.number_input("IP Other 1", 0, 10, 0)
+    t_other2 = col11.number_input("IP Other 2", 0, 10, 0)
 else:
     col1, col2 = st.sidebar.columns(2)
     t_sluh = col1.number_input("SLUH (total)", 0, 15, 4)
@@ -829,9 +911,12 @@ else:
     t_nf = col3.number_input("NF", 0, 15, 4)
     t_micu = col4.number_input("MICU", 0, 10, 2)
     t_cards = col5.number_input("Cards", 0, 10, 1)
+    col6, col7 = st.sidebar.columns(2)
+    t_other1 = col6.number_input("IP Other 1", 0, 10, 0, key="i_other1")
+    t_other2 = col7.number_input("IP Other 2", 0, 10, 0, key="i_other2")
 
 st.sidebar.markdown("### Block Types")
-st.sidebar.markdown("*Select scheduling pattern for each rotation*")
+st.sidebar.caption("Choose how each rotation is structured: contiguous blocks, alternating ABABA, or single weeks.")
 
 block_types = {}
 block_options = ["ABABA (3×1wk)", "MarioKart (3wk)", "2-week", "1-week"]
@@ -869,6 +954,14 @@ if level == "Senior":
                                            index=block_options.index(defaults['Cards']), key='bt_cards')
         block_types['NF'] = st.selectbox("NF", block_options,
                                         index=block_options.index(defaults['NF']), key='bt_nf')
+    # Custom rotations (IP Other 1 & 2) - only show if target > 0
+    if t_other1 > 0 or t_other2 > 0:
+        st.sidebar.markdown("*Custom rotations*")
+        o_cols = st.sidebar.columns(2)
+        if t_other1 > 0:
+            block_types['IP Other 1'] = o_cols[0].selectbox("IP Other 1", block_options, index=3, key="bt_other1")
+        if t_other2 > 0:
+            block_types['IP Other 2'] = o_cols[1].selectbox("IP Other 2", block_options, index=3, key="bt_other2")
 else:
     # Intern level
     defaults = {
@@ -892,6 +985,14 @@ else:
     with bt_col3:
         block_types['NF'] = st.selectbox("NF", block_options,
                                         index=block_options.index(defaults['NF']), key='bt_nf')
+    # Custom rotations (IP Other 1 & 2) - only show if target > 0
+    if t_other1 > 0 or t_other2 > 0:
+        st.sidebar.markdown("*Custom rotations*")
+        o_cols = st.sidebar.columns(2)
+        if t_other1 > 0:
+            block_types['IP Other 1'] = o_cols[0].selectbox("IP Other 1", block_options, index=3, key="bt_other1")
+        if t_other2 > 0:
+            block_types['IP Other 2'] = o_cols[1].selectbox("IP Other 2", block_options, index=3, key="bt_other2")
 
 st.sidebar.markdown("### Scheduling Rules")
 col_r1, col_r2 = st.sidebar.columns(2)
@@ -917,6 +1018,7 @@ params = {
     'seed': seed, 'max_consec': max_consec, 'ward_len': ward_len,
     'nf_len': nf_len, 'jeop_cap': jeop_cap, 'clinic_freq': clinic_freq,
     't_sluh': t_sluh, 't_va': t_va, 't_nf': t_nf, 't_micu': t_micu, 't_cards': t_cards,
+    't_other1': t_other1, 't_other2': t_other2,
     'block_types': block_types,
 }
 
@@ -957,6 +1059,12 @@ if save_baseline:
 # HEADER
 # ═══════════════════════════════════════════════════════════════════════
 st.markdown(f"# Project Z — {level} Schedule (PGY-{'2/3' if level == 'Senior' else '1'})")
+
+st.markdown("""
+*Welcome to the Project Z Schedule Explorer. This tool lets you design and test ABC (X+Y+Z)
+residency schedules interactively. Adjust parameters in the sidebar, explore the generated schedule
+across tabs, and export your results.*
+""")
 
 # KPIs
 n_residents = len(data['residents'])
@@ -1017,9 +1125,18 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 with tab1:
     # Legend
     legend_html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">'
-    rots = (['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold', 'OP', 'Clinic', 'Jeopardy']
-            if level == "Senior" else
-            ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'ICU*', 'OP', 'Clinic', 'Jeopardy'])
+    if level == "Senior":
+        rots = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold', 'OP', 'Clinic', 'Jeopardy']
+        if t_other1 > 0:
+            rots.insert(-2, 'IP Other 1')  # Insert before OP
+        if t_other2 > 0:
+            rots.insert(-2, 'IP Other 2')
+    else:
+        rots = ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'ICU*', 'OP', 'Clinic', 'Jeopardy']
+        if t_other1 > 0:
+            rots.insert(-2, 'IP Other 1')
+        if t_other2 > 0:
+            rots.insert(-2, 'IP Other 2')
     for rot in rots:
         bg = COLORS.get(rot, '#fff')
         fc = '#fff' if rot in DARK_BG else '#333'
@@ -1027,11 +1144,24 @@ with tab1:
     legend_html += '</div>'
     st.markdown(legend_html, unsafe_allow_html=True)
 
+    st.caption("Each row is one resident. Scroll right to see all 48 weeks. Color legend above. Coverage summary at bottom.")
+
     grid_html = render_schedule_html(data, level, params)
     st.markdown(grid_html, unsafe_allow_html=True)
 
+    # Export button
+    excel_data = export_to_excel(data, level, params)
+    st.download_button(
+        label="📥 Export to Excel",
+        data=excel_data,
+        file_name=f"Project_Z_{level}_Schedule.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 # ── TAB 2: Coverage & Staffing ──
 with tab2:
+    st.caption("Green cells meet the weekly target. Red cells are understaffed. The heatmap gives a bird's-eye view of coverage across all weeks.")
+
     targets = data['targets']
     cov = data['coverage']
     rot_list = [r for r in targets if r != 'Jeopardy']
@@ -1101,6 +1231,8 @@ with tab2:
 
 # ── TAB 3: Balance & Fairness ──
 with tab3:
+    st.caption("These charts show how evenly rotations are distributed across residents. Outliers (>1.5 SD from mean) are flagged below.")
+
     ip_rots = (set(['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold'])
                if level == "Senior" else set(['SLUH', 'VA', 'NF', 'MICU', 'Cards']))
     rot_list_bal = sorted(ip_rots)
@@ -1223,7 +1355,7 @@ with tab4:
 # ── TAB 5: Edit Schedule ──
 with tab5:
     st.markdown("### Manual Schedule Adjustments")
-    st.markdown("*Make individual changes to the generated schedule. Changes persist until you regenerate.*")
+    st.caption("Changes are applied on top of the generated schedule. They persist until you click 'Clear All Edits' or refresh the page.")
 
     # Store edits in session state
     if 'manual_edits' not in st.session_state:
@@ -1238,8 +1370,16 @@ with tab5:
 
         if level == "Senior":
             rot_options = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold', 'OP', 'Jeopardy']
+            if t_other1 > 0:
+                rot_options.insert(-1, 'IP Other 1')
+            if t_other2 > 0:
+                rot_options.insert(-1, 'IP Other 2')
         else:
             rot_options = ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'OP', 'Jeopardy']
+            if t_other1 > 0:
+                rot_options.insert(-1, 'IP Other 1')
+            if t_other2 > 0:
+                rot_options.insert(-1, 'IP Other 2')
         edit_rot = ec3.selectbox("New Rotation", rot_options)
 
         submitted = st.form_submit_button("Apply Change")
