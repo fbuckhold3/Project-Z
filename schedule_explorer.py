@@ -1,4 +1,4 @@
-."""
+"""
 Project Z — Schedule Explorer
 Interactive Streamlit app for exploring ABC residency scheduling configurations.
 Deploy to Posit Connect or run locally: streamlit run schedule_explorer.py

@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Z &mdash; Intern Schedule Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+<style>
+:root{--blue:#4472C4;--dark:#2E75B6;--bg:#f5f6fa;--card:#fff;--border:#dfe3ea;--txt:#333;--muted:#888}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+.header{background:linear-gradient(135deg,var(--blue),var(--dark));color:#fff;padding:18px 32px;display:flex;align-items:center;gap:18px}
+.header h1{font-size:22px;font-weight:600}.header .sub{font-size:13px;opacity:.8}
+.tabs{display:flex;background:#fff;border-bottom:2px solid var(--border);padding:0 24px;gap:0}
+.tab{padding:12px 22px;cursor:pointer;font-size:14px;font-weight:500;color:var(--muted);border-bottom:3px solid transparent;transition:.2s}
+.tab:hover{color:var(--txt)}.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.panel{display:none;padding:24px}.panel.active{display:block}
+.card{background:var(--card);border-radius:10px;border:1px solid var(--border);padding:20px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.card h3{font-size:15px;font-weight:600;margin-bottom:12px;color:var(--dark)}
+.kpi-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+.kpi{background:var(--card);border-radius:10px;border:1px solid var(--border);padding:16px 22px;min-width:140px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.kpi .val{font-size:28px;font-weight:700;color:var(--blue)}.kpi .label{font-size:12px;color:var(--muted);margin-top:4px}
+select{padding:8px 14px;border:1px solid var(--border);border-radius:6px;font-size:14px;background:#fff;min-width:200px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{background:var(--blue);color:#fff;padding:6px 4px;text-align:center;position:sticky;top:0;z-index:2;font-weight:500}
+td{padding:4px 3px;text-align:center;border:1px solid #eee;white-space:nowrap}
+.grid-wrap{overflow-x:auto;max-height:70vh;overflow-y:auto;border-radius:8px;border:1px solid var(--border)}
+.rot-SLUH{background:#B3D9FF}.rot-VA{background:#FFCC99}.rot-NF{background:#D9B3FF}
+.rot-MICU{background:#FFB3B3}.rot-Cards{background:#FFFFB3}.rot-OP{background:#B3FFB3}
+.rot-Clinic{background:#fff}.rot-Jeopardy{background:#FFE0B2}.rot-ICU\*{background:#FFD9D9}
+.rot-empty{background:#f0f0f0}
+.section-hdr td{background:#D6DCE4;font-weight:700;font-size:12px;text-align:left;padding:6px 8px}
+.summary-hdr td{background:#FFF2CC;font-weight:700;font-size:12px}
+.good{background:#B3FFB3!important}.bad{background:#FF9999!important}
+.highlight-row td{outline:2px solid #FF6B00;outline-offset:-1px}
+.clickable{cursor:pointer}.clickable:hover td{background:#e8f0fe!important}
+.flex-row{display:flex;gap:20px;flex-wrap:wrap}.flex-row>div{flex:1;min-width:300px}
+.resident-timeline{margin:12px 0}.timeline-bar{display:flex;height:28px;border-radius:4px;overflow:hidden}
+.timeline-bar div{display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:500;color:#333;min-width:0}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;margin:12px 0}
+.stat-item{background:#f8f9fb;border-radius:6px;padding:10px;text-align:center}
+.stat-item .sv{font-size:20px;font-weight:700;color:var(--blue)}.stat-item .sl{font-size:11px;color:var(--muted)}
+.legend-row{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
+.legend-item{display:flex;align-items:center;gap:6px;font-size:12px}
+.legend-swatch{width:16px;height:16px;border-radius:3px;border:1px solid #ccc}
+.filter-bar{display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.filter-bar label{font-size:13px;font-weight:500}
+@media(max-width:768px){.kpi-row{flex-direction:column}.flex-row{flex-direction:column}.tabs{overflow-x:auto}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Project Z &mdash; Intern Schedule Dashboard</h1>
+    <div class="sub">PGY-1 Schedule: 31 IM Interns + 32 Rotators &bull; 48-Week Year &bull; ABC Model</div>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab(0)">Schedule Grid</div>
+  <div class="tab" onclick="showTab(1)">Resident Deep Dive</div>
+  <div class="tab" onclick="showTab(2)">Weekly Staffing</div>
+  <div class="tab" onclick="showTab(3)">Balance &amp; Fairness</div>
+</div>
+
+<div class="panel active" id="panel0"></div>
+<div class="panel" id="panel1"></div>
+<div class="panel" id="panel2"></div>
+<div class="panel" id="panel3"></div>
+
+<script>
+const D = {"weeks": 48, "targets": {"SLUH": 4, "VA": 5, "NF": 4, "MICU": 2, "Cards": 1, "Jeopardy": 1}, "interns": [{"id": "I_cat01", "type": "cat", "pos": 1, "schedule": ["Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "MICU", "NF", "NF", "Jeopardy", "OP", "Clinic", "OP", "NF", "NF", "OP", "OP", "Clinic", "Cards", "OP", "MICU", "OP", "OP", "Clinic", "OP", "Jeopardy", "OP", "NF", "NF", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "OP", "NF", "NF", "MICU", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 8, "MICU": 3, "Cards": 1, "Jeopardy": 2, "OP": 17, "Clinic": 8}, "ip": 21, "op": 19, "clinic": 8, "maxConsec": 3}, {"id": "I_cat02", "type": "cat", "pos": 2, "schedule": ["OP", "Clinic", "NF", "NF", "OP", "Jeopardy", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "MICU", "OP", "NF", "NF", "OP", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "NF", "NF", "MICU", "OP", "Cards", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "NF", "NF", "MICU", "Jeopardy"], "counts": {"SLUH": 6, "VA": 3, "NF": 8, "MICU": 3, "Cards": 1, "Jeopardy": 2, "OP": 17, "Clinic": 8}, "ip": 21, "op": 19, "clinic": 8, "maxConsec": 3}, {"id": "I_cat03", "type": "cat", "pos": 3, "schedule": ["OP", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "Jeopardy", "OP", "Clinic", "MICU", "NF", "NF", "OP", "OP", "Clinic", "VA", "VA", "VA", "OP", "Cards", "Clinic", "OP", "NF", "NF", "OP", "MICU", "Clinic", "VA", "VA", "VA", "OP", "OP", "Clinic", "MICU", "NF", "NF", "OP", "Jeopardy", "Clinic", "OP", "OP", "OP", "OP", "Cards", "Clinic", "OP", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat04", "type": "cat", "pos": 4, "schedule": ["OP", "OP", "Jeopardy", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "NF", "NF", "OP", "Clinic", "MICU", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "NF", "NF", "MICU", "OP", "Cards", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "NF", "NF"], "counts": {"SLUH": 6, "VA": 6, "NF": 6, "MICU": 2, "Cards": 1, "Jeopardy": 1, "OP": 18, "Clinic": 8}, "ip": 21, "op": 19, "clinic": 8, "maxConsec": 3}, {"id": "I_cat05", "type": "cat", "pos": 5, "schedule": ["NF", "NF", "MICU", "OP", "Clinic", "OP", "OP", "Cards", "OP", "OP", "Clinic", "OP", "OP", "OP", "NF", "NF", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "MICU", "OP", "Jeopardy", "NF", "NF", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "OP", "OP", "OP", "OP", "Cards", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "MICU"], "counts": {"SLUH": 6, "VA": 3, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat06", "type": "cat", "pos": 6, "schedule": ["VA", "VA", "VA", "OP", "OP", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "NF", "NF", "MICU", "OP", "Cards", "Clinic", "OP", "Jeopardy", "OP", "MICU", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "OP", "Clinic", "VA", "VA", "VA", "OP", "Cards", "Clinic", "OP", "OP", "OP", "MICU", "Jeopardy", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat07", "type": "cat", "pos": 1, "schedule": ["Clinic", "Cards", "OP", "VA", "VA", "VA", "Clinic", "OP", "NF", "NF", "MICU", "OP", "Clinic", "OP", "OP", "MICU", "OP", "OP", "Clinic", "OP", "NF", "NF", "OP", "OP", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "Jeopardy", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "MICU", "NF", "NF", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 1, "Jeopardy": 1, "OP": 20, "Clinic": 8}, "ip": 19, "op": 21, "clinic": 8, "maxConsec": 3}, {"id": "I_cat08", "type": "cat", "pos": 2, "schedule": ["Jeopardy", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "NF", "NF", "OP", "MICU", "OP", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "MICU", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "NF", "NF", "Cards", "OP", "MICU", "Clinic", "OP", "OP", "NF", "NF"], "counts": {"SLUH": 3, "VA": 6, "NF": 8, "MICU": 3, "Cards": 1, "Jeopardy": 1, "OP": 18, "Clinic": 8}, "ip": 21, "op": 19, "clinic": 8, "maxConsec": 3}, {"id": "I_cat09", "type": "cat", "pos": 3, "schedule": ["Cards", "OP", "Clinic", "MICU", "NF", "NF", "OP", "OP", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "OP", "Clinic", "VA", "VA", "VA", "OP", "OP", "Clinic", "MICU", "NF", "NF", "Jeopardy", "OP", "Clinic", "OP", "NF", "NF", "OP", "MICU", "Clinic", "OP", "OP", "Cards", "OP", "OP", "Clinic", "VA", "VA", "VA"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat10", "type": "cat", "pos": 4, "schedule": ["SLUH", "SLUH", "SLUH", "Clinic", "MICU", "OP", "VA", "VA", "VA", "Clinic", "NF", "NF", "Jeopardy", "OP", "Cards", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "NF", "NF", "MICU", "OP", "OP", "Clinic", "OP", "Cards", "OP", "OP", "MICU", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat11", "type": "cat", "pos": 5, "schedule": ["VA", "VA", "VA", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "MICU", "NF", "NF", "Jeopardy", "Cards", "Clinic", "OP", "MICU", "OP", "OP", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "OP", "NF", "NF", "OP", "OP", "Clinic", "Cards", "NF", "NF", "OP", "OP", "Clinic", "MICU", "OP", "OP", "OP", "OP", "Clinic", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat12", "type": "cat", "pos": 6, "schedule": ["NF", "NF", "OP", "OP", "MICU", "Clinic", "VA", "VA", "VA", "Jeopardy", "OP", "Clinic", "Cards", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "OP", "MICU", "OP", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "VA", "VA", "VA", "Jeopardy", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "MICU", "Clinic", "OP", "OP", "NF", "NF", "OP", "Clinic"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 1, "Jeopardy": 2, "OP": 19, "Clinic": 8}, "ip": 19, "op": 21, "clinic": 8, "maxConsec": 3}, {"id": "I_cat13", "type": "cat", "pos": 1, "schedule": ["Clinic", "OP", "NF", "NF", "OP", "OP", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "MICU", "OP", "VA", "VA", "VA", "Clinic", "OP", "NF", "NF", "Jeopardy", "Cards", "Clinic", "OP", "NF", "NF", "OP", "MICU", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "MICU", "OP", "NF", "NF"], "counts": {"SLUH": 6, "VA": 3, "NF": 8, "MICU": 3, "Cards": 1, "Jeopardy": 1, "OP": 18, "Clinic": 8}, "ip": 21, "op": 19, "clinic": 8, "maxConsec": 3}, {"id": "I_cat14", "type": "cat", "pos": 2, "schedule": ["OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "MICU", "OP", "NF", "NF", "OP", "Clinic", "NF", "NF", "OP", "MICU", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "Jeopardy", "Clinic", "Cards", "OP", "OP", "OP", "OP", "Clinic", "NF", "NF", "OP", "Jeopardy", "MICU", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "OP", "OP", "OP", "Cards"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat15", "type": "cat", "pos": 3, "schedule": ["NF", "NF", "Clinic", "Jeopardy", "OP", "OP", "MICU", "OP", "Clinic", "OP", "Cards", "OP", "OP", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "OP", "Clinic", "VA", "VA", "VA", "OP", "MICU", "Clinic", "OP", "NF", "NF", "OP", "OP", "Clinic", "MICU", "OP", "OP", "NF", "NF", "Clinic", "OP", "OP", "Jeopardy", "OP", "OP", "Clinic", "VA", "VA", "VA"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 1, "Jeopardy": 2, "OP": 19, "Clinic": 8}, "ip": 19, "op": 21, "clinic": 8, "maxConsec": 3}, {"id": "I_cat16", "type": "cat", "pos": 4, "schedule": ["VA", "VA", "VA", "Clinic", "OP", "MICU", "OP", "Jeopardy", "Cards", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "NF", "NF", "OP", "OP", "MICU", "Clinic", "NF", "NF", "OP", "Cards", "OP", "Clinic", "OP", "OP", "NF", "NF", "MICU", "Clinic", "OP", "OP", "Jeopardy", "OP", "OP", "Clinic", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat17", "type": "cat", "pos": 5, "schedule": ["SLUH", "SLUH", "SLUH", "OP", "Clinic", "MICU", "NF", "NF", "OP", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "MICU", "NF", "NF", "Jeopardy", "Cards", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "MICU", "NF", "NF", "OP", "Cards", "Clinic", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat18", "type": "cat", "pos": 6, "schedule": ["VA", "VA", "VA", "OP", "OP", "Clinic", "NF", "NF", "MICU", "OP", "OP", "Clinic", "OP", "OP", "OP", "Jeopardy", "OP", "Clinic", "MICU", "OP", "OP", "OP", "Cards", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "OP", "Clinic", "NF", "NF", "MICU", "OP", "OP", "Clinic", "VA", "VA", "VA", "OP", "OP", "Clinic", "NF", "NF", "OP", "MICU", "OP", "Clinic"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 4, "Cards": 1, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat19", "type": "cat", "pos": 1, "schedule": ["Clinic", "MICU", "NF", "NF", "OP", "Cards", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "MICU", "OP", "OP", "OP", "OP", "Clinic", "OP", "NF", "NF", "Cards", "Jeopardy", "Clinic", "MICU", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "VA", "VA", "VA"], "counts": {"SLUH": 3, "VA": 6, "NF": 4, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 21, "Clinic": 8}, "ip": 18, "op": 22, "clinic": 8, "maxConsec": 3}, {"id": "I_cat20", "type": "cat", "pos": 2, "schedule": ["OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "NF", "NF", "MICU", "OP", "MICU", "Clinic", "OP", "OP", "OP", "Jeopardy", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "Cards", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "NF", "NF", "OP", "MICU", "OP", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "MICU", "OP", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 4, "Cards": 1, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat21", "type": "cat", "pos": 3, "schedule": ["OP", "OP", "Clinic", "OP", "NF", "NF", "OP", "OP", "Clinic", "OP", "OP", "OP", "NF", "NF", "Clinic", "VA", "VA", "VA", "Jeopardy", "MICU", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "MICU", "OP", "Cards", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "OP", "Clinic", "OP", "NF", "NF", "MICU", "Jeopardy", "Clinic", "OP", "NF", "NF"], "counts": {"SLUH": 6, "VA": 3, "NF": 8, "MICU": 3, "Cards": 1, "Jeopardy": 2, "OP": 17, "Clinic": 8}, "ip": 21, "op": 19, "clinic": 8, "maxConsec": 3}, {"id": "I_cat22", "type": "cat", "pos": 4, "schedule": ["MICU", "Jeopardy", "OP", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "NF", "NF", "Cards", "OP", "MICU", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "OP", "OP", "NF", "NF", "OP", "Clinic", "MICU", "OP", "VA", "VA", "VA", "Clinic", "OP", "OP", "Cards", "OP", "OP", "Clinic", "Jeopardy", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat23", "type": "cat", "pos": 5, "schedule": ["MICU", "OP", "OP", "Cards", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "OP", "NF", "NF", "MICU", "OP", "Clinic", "Jeopardy", "NF", "NF", "OP", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "MICU", "Jeopardy", "OP", "NF", "NF", "Clinic", "OP", "OP", "OP", "Cards", "OP", "Clinic", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat24", "type": "cat", "pos": 6, "schedule": ["OP", "OP", "OP", "OP", "Cards", "Clinic", "VA", "VA", "VA", "OP", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "MICU", "Clinic", "NF", "NF", "OP", "OP", "MICU", "Clinic", "NF", "NF", "Jeopardy", "OP", "Jeopardy", "Clinic", "OP", "OP", "NF", "NF", "OP", "Clinic", "OP", "MICU", "OP", "OP", "OP", "Clinic", "VA", "VA", "VA", "OP", "Cards", "Clinic"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_cat25", "type": "cat", "pos": 1, "schedule": ["Clinic", "OP", "OP", "OP", "NF", "NF", "Clinic", "MICU", "Jeopardy", "Cards", "OP", "OP", "Clinic", "OP", "OP", "OP", "NF", "NF", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "OP", "MICU", "OP", "OP", "OP", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "MICU", "Jeopardy", "NF", "NF", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH"], "counts": {"SLUH": 6, "VA": 3, "NF": 6, "MICU": 3, "Cards": 1, "Jeopardy": 2, "OP": 19, "Clinic": 8}, "ip": 19, "op": 21, "clinic": 8, "maxConsec": 3}, {"id": "I_cat26", "type": "cat", "pos": 2, "schedule": ["OP", "Clinic", "OP", "MICU", "Jeopardy", "OP", "OP", "Clinic", "NF", "NF", "OP", "Cards", "OP", "Clinic", "OP", "MICU", "OP", "OP", "OP", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "OP", "MICU", "NF", "NF", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH"], "counts": {"SLUH": 6, "VA": 3, "NF": 6, "MICU": 3, "Cards": 1, "Jeopardy": 1, "OP": 20, "Clinic": 8}, "ip": 19, "op": 21, "clinic": 8, "maxConsec": 3}, {"id": "I_pre01", "type": "prelim", "pos": 3, "schedule": ["OP", "OP", "Clinic", "SLUH", "SLUH", "SLUH", "OP", "MICU", "Clinic", "OP", "NF", "NF", "OP", "Cards", "Clinic", "VA", "VA", "VA", "OP", "OP", "Clinic", "Jeopardy", "MICU", "OP", "NF", "NF", "Clinic", "Cards", "OP", "OP", "OP", "OP", "Clinic", "OP", "OP", "OP", "NF", "NF", "Clinic", "VA", "VA", "VA", "OP", "MICU", "Clinic", "Jeopardy", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_pre02", "type": "prelim", "pos": 4, "schedule": ["OP", "OP", "Cards", "Clinic", "NF", "NF", "MICU", "OP", "OP", "Clinic", "Jeopardy", "OP", "VA", "VA", "VA", "Clinic", "NF", "NF", "OP", "OP", "OP", "Clinic", "OP", "MICU", "OP", "OP", "OP", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "NF", "NF", "MICU", "OP", "Cards", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 1, "OP": 19, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_pre03", "type": "prelim", "pos": 5, "schedule": ["NF", "NF", "MICU", "OP", "Clinic", "OP", "Cards", "OP", "OP", "OP", "Clinic", "Jeopardy", "MICU", "OP", "OP", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "OP", "VA", "VA", "VA", "OP", "Clinic", "MICU", "NF", "NF", "OP", "Cards", "Clinic", "OP", "OP", "OP", "Jeopardy", "OP", "Clinic", "OP", "SLUH", "SLUH", "SLUH", "OP", "Clinic", "MICU"], "counts": {"SLUH": 6, "VA": 3, "NF": 4, "MICU": 4, "Cards": 2, "Jeopardy": 2, "OP": 19, "Clinic": 8}, "ip": 19, "op": 21, "clinic": 8, "maxConsec": 3}, {"id": "I_pre04", "type": "prelim", "pos": 6, "schedule": ["SLUH", "SLUH", "SLUH", "OP", "OP", "Clinic", "NF", "NF", "OP", "MICU", "OP", "Clinic", "VA", "VA", "VA", "OP", "OP", "Clinic", "NF", "NF", "Cards", "OP", "OP", "Clinic", "MICU", "OP", "OP", "Jeopardy", "OP", "Clinic", "OP", "OP", "OP", "OP", "Jeopardy", "Clinic", "VA", "VA", "VA", "OP", "MICU", "Clinic", "NF", "NF", "OP", "MICU", "OP", "Clinic"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 4, "Cards": 1, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}, {"id": "I_pre05", "type": "prelim", "pos": 1, "schedule": ["Clinic", "MICU", "NF", "NF", "OP", "OP", "Clinic", "OP", "OP", "VA", "VA", "VA", "Clinic", "Jeopardy", "OP", "OP", "OP", "Cards", "Clinic", "OP", "OP", "SLUH", "SLUH", "SLUH", "Clinic", "OP", "NF", "NF", "MICU", "OP", "Clinic", "MICU", "OP", "VA", "VA", "VA", "Clinic", "Cards", "NF", "NF", "OP", "OP", "Clinic", "OP", "Jeopardy", "OP", "OP", "OP"], "counts": {"SLUH": 3, "VA": 6, "NF": 6, "MICU": 3, "Cards": 2, "Jeopardy": 2, "OP": 18, "Clinic": 8}, "ip": 20, "op": 20, "clinic": 8, "maxConsec": 3}], "rotators": [{"id": "Neuro_1", "type": "Neuro", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH"]}, {"id": "Neuro_2", "type": "Neuro", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "SLUH", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", ""]}, {"id": "Neuro_3", "type": "Neuro", "schedule": ["", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Neuro_4", "type": "Neuro", "schedule": ["", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA"]}, {"id": "Neuro_5", "type": "Neuro", "schedule": ["VA", "VA", "VA", "VA", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", ""]}, {"id": "Neuro_6", "type": "Neuro", "schedule": ["", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", ""]}, {"id": "Anes_1", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Anes_2", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", ""]}, {"id": "Anes_3", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Anes_4", "type": "Anes", "schedule": ["SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Anes_5", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Anes_6", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Anes_7", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Anes_8", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH"]}, {"id": "Anes_9", "type": "Anes", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", ""]}, {"id": "Anes_10", "type": "Anes", "schedule": ["", "", "", "", "SLUH", "SLUH", "SLUH", "SLUH", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Psych_1", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Psych_2", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Psych_3", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Psych_4", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", ""]}, {"id": "Psych_5", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Psych_6", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA"]}, {"id": "Psych_7", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "Psych_8", "type": "Psych", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "VA", "VA", "VA", "VA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "EM_1", "type": "EM", "schedule": ["", "", "", "", "", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "EM_2", "type": "EM", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*"]}, {"id": "EM_3", "type": "EM", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*", "", "", "", ""]}, {"id": "EM_4", "type": "EM", "schedule": ["", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "EM_5", "type": "EM", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "EM_6", "type": "EM", "schedule": ["ICU*", "ICU*", "ICU*", "ICU*", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "EM_7", "type": "EM", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*", "", "", "", "", "", "", "", "", "", "", "", ""]}, {"id": "EM_8", "type": "EM", "schedule": ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "ICU*", "ICU*", "ICU*", "ICU*", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]}], "coverage": {"SLUH": [3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], "VA": [4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3], "NF": [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4], "MICU": [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], "Cards": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "Jeopardy": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]}, "rotator_coverage": {"SLUH": [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], "VA": [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2]}};
+
+const ROT_COLORS = {SLUH:'#B3D9FF',VA:'#FFCC99',NF:'#D9B3FF',MICU:'#FFB3B3',Cards:'#FFFFB3',
+  OP:'#B3FFB3',Clinic:'#ffffff',Jeopardy:'#FFE0B2','ICU*':'#FFD9D9','':'#f0f0f0'};
+const ROT_ORDER = ['SLUH','VA','NF','MICU','Cards','Jeopardy','OP','Clinic'];
+const IP_ROTS = new Set(['SLUH','VA','NF','MICU','Cards']);
+const TW = D.weeks;
+
+function showTab(i){
+  document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('active',j===i));
+  document.querySelectorAll('.panel').forEach((p,j)=>p.classList.toggle('active',j===i));
+  if(i===0 && !panel0Built) buildScheduleGrid();
+  if(i===1 && !panel1Built) buildResidentDive();
+  if(i===2 && !panel2Built) buildWeeklyStaffing();
+  if(i===3 && !panel3Built) buildBalance();
+}
+
+let panel0Built=false, panel1Built=false, panel2Built=false, panel3Built=false;
+
+// ═══════════════════════════════════════════════════════════════════
+// TAB 0: SCHEDULE GRID
+// ═══════════════════════════════════════════════════════════════════
+function buildScheduleGrid(){
+  panel0Built=true;
+  const el=document.getElementById('panel0');
+  
+  // KPIs
+  const fully=Array.from({length:TW},(_,w)=>{
+    const sc=D.coverage.SLUH[w]+(D.rotator_coverage.SLUH[w]||0);
+    const vc=D.coverage.VA[w]+(D.rotator_coverage.VA[w]||0);
+    return sc>=4&&vc>=5&&D.coverage.NF[w]>=4&&D.coverage.MICU[w]>=2&&D.coverage.Cards[w]>=1&&D.coverage.Jeopardy[w]>=1;
+  }).filter(Boolean).length;
+  const maxC=Math.max(...D.interns.map(r=>r.maxConsec));
+  const avgIP=(D.interns.reduce((s,r)=>s+r.ip,0)/D.interns.length).toFixed(1);
+  const avgOP=(D.interns.reduce((s,r)=>s+r.op,0)/D.interns.length).toFixed(1);
+  
+  let h=`<div class="kpi-row">
+    <div class="kpi"><div class="val">${fully}/${TW}</div><div class="label">Fully Staffed Weeks</div></div>
+    <div class="kpi"><div class="val">${maxC}</div><div class="label">Max Consecutive IP</div></div>
+    <div class="kpi"><div class="val">${avgIP}</div><div class="label">Avg IP Weeks/Intern</div></div>
+    <div class="kpi"><div class="val">${avgOP}</div><div class="label">Avg OP Weeks/Intern</div></div>
+    <div class="kpi"><div class="val">${D.interns.length}</div><div class="label">IM Interns</div></div>
+    <div class="kpi"><div class="val">${D.rotators.length}</div><div class="label">Rotators</div></div>
+  </div>`;
+  
+  // Legend
+  h+=`<div class="card"><div class="legend-row">`;
+  for(const[rot,col] of Object.entries(ROT_COLORS)){
+    if(rot) h+=`<div class="legend-item"><div class="legend-swatch" style="background:${col}"></div>${rot}</div>`;
+  }
+  h+=`</div></div>`;
+  
+  // Grid
+  h+=`<div class="card"><h3>Full Schedule Grid <span style="font-weight:400;font-size:12px;color:#888">(click a row to highlight)</span></h3>`;
+  h+=`<div class="filter-bar"><label>Filter:</label>
+    <select id="gridFilter" onchange="filterGrid()">
+      <option value="all">All Residents</option>
+      <option value="intern">IM Interns Only</option>
+      <option value="Neuro">Neurology</option>
+      <option value="Anes">Anesthesia</option>
+      <option value="Psych">Psychiatry</option>
+      <option value="EM">Emergency Med</option>
+    </select></div>`;
+  h+=`<div class="grid-wrap"><table id="schedTable"><thead><tr><th>Resident</th><th>Type</th><th>Pos</th>`;
+  for(let w=0;w<TW;w++) h+=`<th>W${w+1}</th>`;
+  h+=`<th>IP</th><th>OP</th><th>CL</th><th>Max</th>`;
+  for(const r of ['SLUH','VA','NF','MICU','CRD','JEO']) h+=`<th style="background:#2E75B6">${r}</th>`;
+  h+=`</tr></thead><tbody>`;
+  
+  // Section: IM Interns
+  h+=`<tr class="section-hdr" data-group="intern"><td colspan="${TW+10}">IM CATEGORICAL & PRELIM INTERNS (${D.interns.length})</td></tr>`;
+  for(const r of D.interns){
+    h+=`<tr class="clickable" data-group="intern" onclick="highlightRow(this)">`;
+    h+=`<td style="text-align:left;font-weight:500">${r.id}</td>`;
+    h+=`<td>${r.type==='cat'?'Cat':'Pre'}</td><td>${r.pos}</td>`;
+    for(let w=0;w<TW;w++){
+      const v=r.schedule[w];const dv=v==='Jeopardy'?'JEO':v;
+      const cls=v?'rot-'+v.replace('*','\\*'):'rot-empty';
+      h+=`<td class="${cls}" title="W${w+1}: ${v||'—'}">${dv}</td>`;
+    }
+    h+=`<td><b>${r.ip}</b></td><td>${r.op}</td><td>${r.clinic}</td>`;
+    h+=`<td${r.maxConsec>3?' class="bad"':''}>${r.maxConsec}</td>`;
+    const ck=['SLUH','VA','NF','MICU','Cards','Jeopardy'];
+    for(const rn of ck){
+      const cnt=r.counts[rn]||0;
+      const bad=cnt===0&&['SLUH','VA','NF','MICU'].includes(rn)?' class="bad"':'';
+      h+=`<td${bad}>${cnt}</td>`;
+    }
+    h+=`</tr>`;
+  }
+  
+  // Rotator sections
+  const rGroups=[['Neuro','NEUROLOGY (4 mo floors)'],['Anes','ANESTHESIA (1 mo SLUH)'],
+                 ['Psych','PSYCHIATRY (1 mo VA)'],['EM','EMERGENCY MED (1 mo ICU — separate)']];
+  for(const[gkey,glabel] of rGroups){
+    const grp=D.rotators.filter(r=>r.type===gkey);
+    h+=`<tr class="section-hdr" data-group="${gkey}"><td colspan="${TW+10}">${glabel} (${grp.length})</td></tr>`;
+    for(const r of grp){
+      h+=`<tr class="clickable" data-group="${gkey}" onclick="highlightRow(this)">`;
+      h+=`<td style="text-align:left">${r.id}</td><td>${r.type}</td><td></td>`;
+      let ipC=0;
+      for(let w=0;w<TW;w++){
+        const v=r.schedule[w];const dv=v||'';
+        const cls=v?'rot-'+v.replace('*','\\*'):'rot-empty';
+        h+=`<td class="${cls}">${dv}</td>`;
+        if(v&&v!=='') ipC++;
+      }
+      h+=`<td>${ipC}</td><td></td><td></td><td></td>`;
+      const ck2=['SLUH','VA','NF','MICU','Cards','Jeopardy'];
+      for(const rn of ck2){
+        const cnt=r.schedule.filter(s=>s===rn||(rn==='MICU'&&s==='ICU*')).length;
+        h+=`<td>${cnt||''}</td>`;
+      }
+      h+=`</tr>`;
+    }
+  }
+  
+  // Bottom summary
+  h+=`<tr class="summary-hdr"><td colspan="${TW+10}">WEEKLY COVERAGE SUMMARY</td></tr>`;
+  const summaryRows=[
+    {label:'SLUH Total',calc:w=>D.coverage.SLUH[w]+D.rotator_coverage.SLUH[w],tgt:4},
+    {label:'VA Total',calc:w=>D.coverage.VA[w]+D.rotator_coverage.VA[w],tgt:5},
+    {label:'NF',calc:w=>D.coverage.NF[w],tgt:4},
+    {label:'MICU',calc:w=>D.coverage.MICU[w],tgt:2},
+    {label:'Cards',calc:w=>D.coverage.Cards[w],tgt:1},
+    {label:'Jeopardy',calc:w=>D.coverage.Jeopardy[w],tgt:1},
+  ];
+  for(const sr of summaryRows){
+    h+=`<tr><td style="text-align:left;font-weight:600">${sr.label}</td><td>Need ${sr.tgt}</td><td></td>`;
+    for(let w=0;w<TW;w++){
+      const v=sr.calc(w);
+      const cls=v>=sr.tgt?'good':'bad';
+      h+=`<td class="${cls}" style="font-weight:600">${v}</td>`;
+    }
+    h+=`<td colspan="10"></td></tr>`;
+  }
+  
+  h+=`</tbody></table></div></div>`;
+  el.innerHTML=h;
+}
+
+function highlightRow(tr){
+  document.querySelectorAll('.highlight-row').forEach(r=>r.classList.remove('highlight-row'));
+  tr.classList.add('highlight-row');
+}
+
+function filterGrid(){
+  const v=document.getElementById('gridFilter').value;
+  document.querySelectorAll('#schedTable tbody tr').forEach(tr=>{
+    const g=tr.dataset.group;
+    if(!g){tr.style.display='';return;}
+    if(v==='all') tr.style.display='';
+    else if(v==='intern') tr.style.display=g==='intern'?'':'none';
+    else tr.style.display=g===v?'':'none';
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TAB 1: RESIDENT DEEP DIVE
+// ═══════════════════════════════════════════════════════════════════
+function buildResidentDive(){
+  panel1Built=true;
+  const el=document.getElementById('panel1');
+  let h=`<div class="card"><h3>Select a Resident</h3>
+    <select id="resSel" onchange="updateResDive()">`;
+  for(const r of D.interns) h+=`<option value="${r.id}">${r.id} (${r.type==='cat'?'Categorical':'Prelim'}, Pos ${r.pos})</option>`;
+  h+=`</select></div>
+    <div class="flex-row">
+      <div class="card" id="resTimeline" style="flex:2"></div>
+      <div class="card" id="resStats" style="flex:1"></div>
+    </div>
+    <div class="flex-row">
+      <div class="card" id="resRotChart"></div>
+      <div class="card" id="resCompare"></div>
+    </div>`;
+  el.innerHTML=h;
+  updateResDive();
+}
+
+function updateResDive(){
+  const rid=document.getElementById('resSel').value;
+  const r=D.interns.find(x=>x.id===rid);
+  
+  // Timeline
+  let tl=`<h3>${r.id} &mdash; 48-Week Timeline</h3><div class="resident-timeline"><div class="timeline-bar">`;
+  for(let w=0;w<TW;w++){
+    const v=r.schedule[w]; const col=ROT_COLORS[v]||'#eee';
+    const dv=v==='Jeopardy'?'JEO':v==='Clinic'?'CL':v;
+    tl+=`<div style="flex:1;background:${col}" title="W${w+1}: ${v}">${dv}</div>`;
+  }
+  tl+=`</div></div>`;
+  
+  // Consecutive IP streaks
+  let streaks=[];let cur=0;let start=-1;
+  for(let w=0;w<TW;w++){
+    if(IP_ROTS.has(r.schedule[w])){if(cur===0)start=w;cur++;}
+    else{if(cur>0)streaks.push({start,len:cur});cur=0;}
+  }
+  if(cur>0)streaks.push({start,len:cur});
+  streaks.sort((a,b)=>b.len-a.len);
+  tl+=`<p style="font-size:12px;color:#888;margin-top:8px">Longest IP streaks: `;
+  tl+=streaks.slice(0,5).map(s=>`${s.len}wk (W${s.start+1}-W${s.start+s.len})`).join(', ');
+  tl+=`</p>`;
+  document.getElementById('resTimeline').innerHTML=tl;
+  
+  // Stats
+  let st=`<h3>Summary Stats</h3><div class="stat-grid">`;
+  st+=`<div class="stat-item"><div class="sv">${r.ip}</div><div class="sl">IP Weeks</div></div>`;
+  st+=`<div class="stat-item"><div class="sv">${r.op}</div><div class="sl">OP Weeks</div></div>`;
+  st+=`<div class="stat-item"><div class="sv">${r.clinic}</div><div class="sl">Clinic Weeks</div></div>`;
+  st+=`<div class="stat-item"><div class="sv">${r.maxConsec}</div><div class="sl">Max Consec IP</div></div>`;
+  st+=`<div class="stat-item"><div class="sv">${r.pos}</div><div class="sl">Clinic Position</div></div>`;
+  st+=`<div class="stat-item"><div class="sv">${r.type==='cat'?'Cat':'Pre'}</div><div class="sl">Type</div></div>`;
+  st+=`</div>`;
+  document.getElementById('resStats').innerHTML=st;
+  
+  // Rotation chart
+  const rots=['SLUH','VA','NF','MICU','Cards','Jeopardy'];
+  const vals=rots.map(rn=>r.counts[rn]||0);
+  const avgs=rots.map(rn=>{
+    const sum=D.interns.reduce((s,x)=>s+(x.counts[rn]||0),0);
+    return +(sum/D.interns.length).toFixed(1);
+  });
+  Plotly.newPlot('resRotChart',[
+    {x:rots,y:vals,type:'bar',name:r.id,marker:{color:'#4472C4'}},
+    {x:rots,y:avgs,type:'bar',name:'Cohort Avg',marker:{color:'#C4C4C4'}}
+  ],{title:{text:'Rotation Weeks vs Cohort Average',font:{size:14}},
+    barmode:'group',height:320,margin:{t:40,b:40,l:40,r:20},
+    yaxis:{title:'Weeks'}},{responsive:true});
+  
+  // Where does this resident rank?
+  let cmp=`<h3>Percentile Rankings</h3><div style="font-size:13px">`;
+  for(const rn of rots){
+    const allVals=D.interns.map(x=>x.counts[rn]||0).sort((a,b)=>a-b);
+    const myVal=r.counts[rn]||0;
+    const pct=Math.round(allVals.filter(v=>v<=myVal).length/allVals.length*100);
+    const bar=`<div style="display:flex;align-items:center;gap:8px;margin:4px 0">
+      <span style="width:60px;font-weight:500">${rn}</span>
+      <div style="flex:1;background:#eee;height:14px;border-radius:7px;overflow:hidden">
+        <div style="width:${pct}%;background:${ROT_COLORS[rn]};height:100%;border-radius:7px;border:1px solid rgba(0,0,0,.15)"></div>
+      </div>
+      <span style="width:55px;text-align:right">${myVal}wk (P${pct})</span></div>`;
+    cmp+=bar;
+  }
+  cmp+=`</div>`;
+  document.getElementById('resCompare').innerHTML=cmp;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TAB 2: WEEKLY STAFFING
+// ═══════════════════════════════════════════════════════════════════
+function buildWeeklyStaffing(){
+  panel2Built=true;
+  const el=document.getElementById('panel2');
+  
+  // Heatmap data
+  const rots=['SLUH','VA','NF','MICU','Cards','Jeopardy'];
+  const weeks=Array.from({length:TW},(_,i)=>`W${i+1}`);
+  
+  el.innerHTML=`<div class="card"><h3>Service Coverage Heatmap</h3>
+    <div id="heatmapChart"></div></div>
+    <div class="flex-row">
+      <div class="card"><h3>SLUH Coverage Breakdown</h3><div id="sluhChart"></div></div>
+      <div class="card"><h3>VA Coverage Breakdown</h3><div id="vaChart"></div></div>
+    </div>
+    <div class="card"><h3>Weekly Coverage Table</h3><div class="grid-wrap" id="staffTable"></div></div>`;
+  
+  // Heatmap
+  const z=rots.map(rot=>{
+    return Array.from({length:TW},(_,w)=>{
+      if(rot==='SLUH') return D.coverage.SLUH[w]+D.rotator_coverage.SLUH[w];
+      if(rot==='VA') return D.coverage.VA[w]+D.rotator_coverage.VA[w];
+      return D.coverage[rot][w];
+    });
+  });
+  const tgts=[4,5,4,2,1,1];
+  const text=z.map((row,i)=>row.map(v=>v>=tgts[i]?'✓':'⚠'));
+  
+  Plotly.newPlot('heatmapChart',[{z,x:weeks,y:rots,type:'heatmap',
+    colorscale:[[0,'#FF9999'],[0.5,'#FFFFB3'],[1,'#B3FFB3']],
+    text:z.map(row=>row.map(v=>v.toString())),texttemplate:'%{text}',
+    hovertemplate:'%{y} W%{x}: %{z}<extra></extra>'}],
+    {height:250,margin:{t:10,b:40,l:80,r:20},
+    xaxis:{dtick:4}},{responsive:true});
+  
+  // SLUH breakdown
+  const sluhI=D.coverage.SLUH;
+  const sluhR=D.rotator_coverage.SLUH;
+  Plotly.newPlot('sluhChart',[
+    {x:weeks,y:sluhI,name:'Intern',type:'bar',marker:{color:'#B3D9FF'}},
+    {x:weeks,y:sluhR,name:'Rotator',type:'bar',marker:{color:'#6BA3D6'}},
+    {x:weeks,y:Array(TW).fill(4),name:'Target',type:'scatter',mode:'lines',line:{color:'red',dash:'dash'}}
+  ],{barmode:'stack',height:280,margin:{t:10,b:40,l:40,r:20},
+    yaxis:{title:'Count'},xaxis:{dtick:4}},{responsive:true});
+  
+  // VA breakdown
+  const vaI=D.coverage.VA;
+  const vaR=D.rotator_coverage.VA;
+  Plotly.newPlot('vaChart',[
+    {x:weeks,y:vaI,name:'Intern',type:'bar',marker:{color:'#FFCC99'}},
+    {x:weeks,y:vaR,name:'Rotator',type:'bar',marker:{color:'#D4A76A'}},
+    {x:weeks,y:Array(TW).fill(5),name:'Target',type:'scatter',mode:'lines',line:{color:'red',dash:'dash'}}
+  ],{barmode:'stack',height:280,margin:{t:10,b:40,l:40,r:20},
+    yaxis:{title:'Count'},xaxis:{dtick:4}},{responsive:true});
+  
+  // Staffing table
+  let t=`<table><thead><tr><th>Week</th><th>SLUH(I)</th><th>SLUH(R)</th><th>SLUH Tot</th>
+    <th>VA(I)</th><th>VA(R)</th><th>VA Tot</th><th>NF</th><th>MICU</th><th>Cards</th><th>Jeo</th>
+    <th>OP</th><th>Clinic</th></tr></thead><tbody>`;
+  for(let w=0;w<TW;w++){
+    const si=D.coverage.SLUH[w],sr=D.rotator_coverage.SLUH[w],st2=si+sr;
+    const vi=D.coverage.VA[w],vr=D.rotator_coverage.VA[w],vt=vi+vr;
+    const op=D.interns.filter(r=>r.schedule[w]==='OP'||r.schedule[w]==='Jeopardy').length;
+    const cl=D.interns.filter(r=>r.schedule[w]==='Clinic').length;
+    t+=`<tr><td><b>W${w+1}</b></td><td>${si}</td><td>${sr}</td>
+      <td class="${st2>=4?'good':'bad'}"><b>${st2}</b></td>
+      <td>${vi}</td><td>${vr}</td>
+      <td class="${vt>=5?'good':'bad'}"><b>${vt}</b></td>
+      <td class="${D.coverage.NF[w]>=4?'good':'bad'}">${D.coverage.NF[w]}</td>
+      <td class="${D.coverage.MICU[w]>=2?'good':'bad'}">${D.coverage.MICU[w]}</td>
+      <td class="${D.coverage.Cards[w]>=1?'good':'bad'}">${D.coverage.Cards[w]}</td>
+      <td class="${D.coverage.Jeopardy[w]>=1?'good':'bad'}">${D.coverage.Jeopardy[w]}</td>
+      <td>${op}</td><td>${cl}</td></tr>`;
+  }
+  t+=`</tbody></table>`;
+  document.getElementById('staffTable').innerHTML=t;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TAB 3: BALANCE & FAIRNESS
+// ═══════════════════════════════════════════════════════════════════
+function buildBalance(){
+  panel3Built=true;
+  const el=document.getElementById('panel3');
+  
+  el.innerHTML=`<div class="card"><h3>IP Load Distribution</h3><div id="ipDist"></div></div>
+    <div class="flex-row">
+      <div class="card"><h3>Rotation Distribution (Box Plots)</h3><div id="rotBoxes"></div></div>
+      <div class="card"><h3>Outlier Analysis</h3><div id="outliers"></div></div>
+    </div>
+    <div class="card"><h3>Resident Comparison Table</h3>
+      <div style="font-size:12px;color:#888;margin-bottom:8px">Sort by clicking column headers</div>
+      <div class="grid-wrap" id="balanceTable"></div></div>`;
+  
+  // IP distribution histogram
+  const ipVals=D.interns.map(r=>r.ip);
+  Plotly.newPlot('ipDist',[{x:ipVals,type:'histogram',marker:{color:'#4472C4'},
+    xbins:{start:Math.min(...ipVals)-0.5,end:Math.max(...ipVals)+0.5,size:1}}],
+    {height:250,margin:{t:10,b:40,l:40,r:20},
+    xaxis:{title:'IP Weeks',dtick:1},yaxis:{title:'# Interns'}},{responsive:true});
+  
+  // Box plots per rotation
+  const rots=['SLUH','VA','NF','MICU','Cards'];
+  const traces=rots.map(rn=>({
+    y:D.interns.map(r=>r.counts[rn]||0),
+    type:'box',name:rn,
+    marker:{color:ROT_COLORS[rn]},
+    line:{color:'#333'}
+  }));
+  Plotly.newPlot('rotBoxes',traces,
+    {height:320,margin:{t:10,b:40,l:40,r:20},yaxis:{title:'Weeks'}},{responsive:true});
+  
+  // Outlier analysis
+  let out=`<div style="font-size:13px">`;
+  for(const rn of rots){
+    const vals=D.interns.map(r=>({id:r.id,v:r.counts[rn]||0}));
+    const mean=vals.reduce((s,x)=>s+x.v,0)/vals.length;
+    const std=Math.sqrt(vals.reduce((s,x)=>s+(x.v-mean)**2,0)/vals.length);
+    const outliers=vals.filter(x=>Math.abs(x.v-mean)>1.5*std);
+    if(outliers.length>0){
+      out+=`<div style="margin:6px 0"><b>${rn}</b> (mean ${mean.toFixed(1)}, std ${std.toFixed(1)}): `;
+      out+=outliers.map(o=>`<span style="color:${o.v>mean?'#c00':'#06c'}">${o.id}=${o.v}</span>`).join(', ');
+      out+=`</div>`;
+    }
+  }
+  const ipMean=ipVals.reduce((s,v)=>s+v,0)/ipVals.length;
+  const ipStd=Math.sqrt(ipVals.reduce((s,v)=>s+(v-ipMean)**2,0)/ipVals.length);
+  const ipOut=D.interns.filter(r=>Math.abs(r.ip-ipMean)>1.5*ipStd);
+  if(ipOut.length>0){
+    out+=`<div style="margin:6px 0"><b>Total IP</b> (mean ${ipMean.toFixed(1)}): `;
+    out+=ipOut.map(r=>`<span style="color:${r.ip>ipMean?'#c00':'#06c'}">${r.id}=${r.ip}</span>`).join(', ');
+    out+=`</div>`;
+  }
+  if(out===`<div style="font-size:13px">`) out+=`<p style="color:green">No significant outliers detected (>1.5 SD from mean).</p>`;
+  out+=`</div>`;
+  document.getElementById('outliers').innerHTML=`<h3 style="margin-bottom:10px">Flagged Residents (>1.5 SD from mean)</h3>`+out;
+  
+  // Comparison table
+  let sortCol='ip',sortDir=-1;
+  function renderTable(){
+    const sorted=[...D.interns].sort((a,b)=>{
+      let av,bv;
+      if(sortCol==='id'){av=a.id;bv=b.id;return sortDir*(av<bv?-1:1);}
+      if(sortCol==='ip'){av=a.ip;bv=b.ip;}
+      else if(sortCol==='op'){av=a.op;bv=b.op;}
+      else if(sortCol==='maxConsec'){av=a.maxConsec;bv=b.maxConsec;}
+      else{av=a.counts[sortCol]||0;bv=b.counts[sortCol]||0;}
+      return sortDir*(av-bv);
+    });
+    const cols=['id','type','SLUH','VA','NF','MICU','Cards','Jeopardy','ip','op','maxConsec'];
+    const labels=['Resident','Type','SLUH','VA','NF','MICU','Cards','Jeo','IP','OP','MaxC'];
+    let t=`<table><thead><tr>`;
+    for(let i=0;i<cols.length;i++){
+      const arrow=sortCol===cols[i]?(sortDir>0?' ▲':' ▼'):'';
+      t+=`<th style="cursor:pointer" data-col="${cols[i]}">${labels[i]}${arrow}</th>`;
+    }
+    t+=`</tr></thead><tbody>`;
+    for(const r of sorted){
+      t+=`<tr><td style="text-align:left;font-weight:500">${r.id}</td><td>${r.type==='cat'?'Cat':'Pre'}</td>`;
+      for(const rn of ['SLUH','VA','NF','MICU','Cards','Jeopardy']){
+        const v=r.counts[rn]||0;
+        const avg=D.interns.reduce((s,x)=>s+(x.counts[rn]||0),0)/D.interns.length;
+        const dev=Math.abs(v-avg);const std2=Math.sqrt(D.interns.reduce((s,x)=>s+((x.counts[rn]||0)-avg)**2,0)/D.interns.length);
+        const cls=dev>1.5*std2?(v>avg?'bad':''):'';
+        t+=`<td class="${cls}">${v}</td>`;
+      }
+      t+=`<td><b>${r.ip}</b></td><td>${r.op}</td>`;
+      t+=`<td${r.maxConsec>3?' class="bad"':''}>${r.maxConsec}</td></tr>`;
+    }
+    t+=`</tbody></table>`;
+    document.getElementById('balanceTable').innerHTML=t;
+    document.querySelectorAll('#balanceTable th[data-col]').forEach(th=>{
+      th.addEventListener('click',()=>{
+        const c=th.dataset.col;
+        if(sortCol===c)sortDir*=-1;else{sortCol=c;sortDir=-1;}
+        renderTable();
+      });
+    });
+  }
+  renderTable();
+}
+
+// Build first tab on load
+buildScheduleGrid();
+</script>
+</body>
+</html>
