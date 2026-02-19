@@ -1459,8 +1459,8 @@ if 'manual_edits' in st.session_state:
 # ═══════════════════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Schedule Grid", "Coverage & Staffing", "Balance & Fairness", "Compare", "Edit Schedule"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Schedule Grid", "By Rotation", "Coverage & Staffing", "Balance & Fairness", "Compare", "Edit Schedule"
 ])
 
 # ── TAB 1: Schedule Grid ──
@@ -1507,8 +1507,112 @@ with tab1:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-# ── TAB 2: Coverage & Staffing ──
+# ── TAB 2: By Rotation ──
 with tab2:
+    st.caption("Each row is a rotation. Cells show which residents are assigned to that rotation each week. "
+               "Role letters (A/B/C) are shown where applicable.")
+
+    residents = data['residents']
+    role_labels = data.get('role_labels', {})
+
+    # Build rotation order
+    if level == "Senior":
+        rot_order = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Gold', 'Jeopardy', 'OP', 'Clinic']
+        if t_diamond > 0:
+            rot_order.insert(7, 'Diamond')
+        if t_other1 > 0:
+            rot_order.insert(-3, 'IP Other 1')
+        if t_other2 > 0:
+            rot_order.insert(-3, 'IP Other 2')
+    else:
+        rot_order = ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'ICU*', 'Jeopardy', 'OP', 'Clinic']
+        if t_other1 > 0:
+            rot_order.insert(-3, 'IP Other 1')
+        if t_other2 > 0:
+            rot_order.insert(-3, 'IP Other 2')
+
+    # Filter out OP/Clinic by default, let user toggle
+    show_op_clinic = st.checkbox("Show OP and Clinic rows", value=False)
+    if not show_op_clinic:
+        rot_order = [r for r in rot_order if r not in ('OP', 'Clinic')]
+
+    # Compact abbreviations for resident IDs in cells
+    ROLE_SHORT = {'MICU': 'MC', 'Bronze': 'BZ', 'Cards': 'CR', 'NF': 'NF'}
+
+    # Build HTML grid: rotations as rows, weeks as columns
+    html = '<div class="schedule-grid"><table>'
+
+    # Header row: weeks
+    html += '<tr><th style="min-width:65px;">Rotation</th>'
+    if TW > 48:
+        html += f'<th colspan="48" class="year-hdr">Year 1 (Weeks 1–48)</th>'
+        html += f'<th colspan="{TW - 48}" class="year-hdr">Year 2 (Weeks 49–{TW})</th>'
+        html += '</tr><tr><th></th>'
+    for w in range(TW):
+        html += f'<th style="min-width:50px;">{w+1}</th>'
+    html += '</tr>'
+
+    # One row per rotation
+    for rot in rot_order:
+        bg = COLORS.get(rot, '#fff')
+        fc = '#fff' if rot in DARK_BG else '#333'
+        abbr = ABBREV.get(rot, rot)
+        html += f'<tr><td style="background:{bg};color:{fc};font-weight:700;white-space:nowrap;position:sticky;left:0;z-index:1;">{abbr}</td>'
+
+        for w in range(TW):
+            # Collect all residents on this rotation this week
+            assigned = []
+            for r in residents:
+                if r['schedule'][w] == rot:
+                    rid = r['id']
+                    letter = role_labels.get((rid, w), '')
+                    if letter and rot in ROLE_LETTER_ROTS:
+                        assigned.append(f'{rid}-{letter}')
+                    else:
+                        assigned.append(rid)
+
+            # Also check rotators for intern SLUH/VA/ICU*
+            if level == "Intern" and rot in ('SLUH', 'VA', 'ICU*'):
+                rotators = data.get('rotators', [])
+                for rr in rotators:
+                    if rr['schedule'][w] == rot:
+                        assigned.append(f'<i>{rr["id"]}</i>')
+
+            cell_bg = bg if assigned else '#f9f9f9'
+            cell_fc = fc if assigned else '#ccc'
+            count = len(assigned)
+            # Show count badge + names
+            if assigned:
+                names = '<br>'.join(assigned)
+                html += (f'<td style="background:{cell_bg};color:{cell_fc};font-size:8px;'
+                         f'vertical-align:top;min-width:55px;padding:1px 2px;">'
+                         f'<b style="font-size:10px;">{count}</b><br>{names}</td>')
+            else:
+                html += f'<td style="background:#f9f9f9;color:#ddd;text-align:center;">—</td>'
+
+        html += '</tr>'
+
+    html += '</table></div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+    # Target summary beneath
+    st.markdown("#### Weekly Targets")
+    tgt_display = data['targets']
+    tgt_html = '<div style="display:flex;gap:12px;flex-wrap:wrap;">'
+    for rot in rot_order:
+        if rot in ('OP', 'Clinic', 'Jeopardy'):
+            continue
+        tgt = tgt_display.get(rot, 0)
+        bg = COLORS.get(rot, '#fff')
+        fc = '#fff' if rot in DARK_BG else '#333'
+        tgt_html += (f'<span style="background:{bg};color:{fc};padding:4px 10px;'
+                     f'border-radius:4px;font-size:12px;border:1px solid #ccc;">'
+                     f'{ABBREV.get(rot,rot)}: {tgt}/wk</span>')
+    tgt_html += '</div>'
+    st.markdown(tgt_html, unsafe_allow_html=True)
+
+# ── TAB 3: Coverage & Staffing ──
+with tab3:
     st.caption("Green cells meet the weekly target. Red cells are understaffed. The heatmap gives a bird's-eye view of coverage across all weeks.")
 
     targets = data['targets']
@@ -1578,8 +1682,8 @@ with tab2:
     cov_df = pd.DataFrame(cov_df_data, index=[f'W{w+1}' for w in range(TW)])
     st.dataframe(cov_df.T, use_container_width=True)
 
-# ── TAB 3: Balance & Fairness ──
-with tab3:
+# ── TAB 4: Balance & Fairness ──
+with tab4:
     st.caption("These charts show how evenly rotations are distributed across residents. "
                "Outliers (>1.5 SD from mean) are flagged below. "
                "Red-highlighted cells in the schedule grid indicate residents below their minimum or above their maximum.")
@@ -1658,8 +1762,8 @@ with tab3:
         table_data.append(row)
     st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
-# ── TAB 4: Compare ──
-with tab4:
+# ── TAB 5: Compare ──
+with tab5:
     if 'baseline' not in st.session_state:
         st.info("No baseline saved yet. Use the **Save as Baseline** button in the sidebar, change parameters, then come back here to compare.")
     elif st.session_state.get('baseline_level') != level:
@@ -1720,7 +1824,7 @@ with tab4:
         st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
 
 # ── TAB 5: Edit Schedule ──
-with tab5:
+with tab6:
     st.markdown("### Manual Schedule Adjustments")
     st.caption("Changes are applied on top of the generated schedule. They persist until you click 'Clear All Edits' or refresh the page.")
 
