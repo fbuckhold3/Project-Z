@@ -975,10 +975,12 @@ def find_best_seed(params, level, max_seed=99):
 # ═══════════════════════════════════════════════════════════════════════
 # SCHEDULE GRID HTML
 # ═══════════════════════════════════════════════════════════════════════
-def render_schedule_html(data, level, params, highlight_jeo=False):
+def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='clinic'):
     """Render schedule as HTML table with colors, role letters, year headers."""
     TW = data.get('total_weeks', 48)
-    residents = data['residents']
+    residents = list(data['residents'])
+    if sort_mode == 'pgy_id':
+        residents.sort(key=lambda r: (r.get('pgy', 1), r['id']))
     coverage = data['coverage']
     targets = data['targets']
     role_labels = data.get('role_labels', {})
@@ -1488,14 +1490,18 @@ with tab1:
     legend_html += '</div>'
     st.markdown(legend_html, unsafe_allow_html=True)
 
-    st.caption(f"Each row is one resident (sorted by clinic position for cascade view). "
+    # Sort and highlight controls
+    ctrl1, ctrl2 = st.columns(2)
+    sort_mode = ctrl1.selectbox("Sort residents by", ["Clinic position (cascade)", "PGY / Resident ID"],
+                                 index=0)
+    sort_key = 'clinic' if 'Clinic' in sort_mode else 'pgy_id'
+    highlight_jeo = ctrl2.checkbox("Highlight Jeopardy weeks (dim everything else)", value=False)
+
+    st.caption(f"Each row is one resident. "
                f"Scroll right to see all {TW} weeks. Role letters (A/B/C) distinguish residents "
                f"on MICU, Bronze, Cards, and NF in the same week. Jeo column shows jeopardy count.")
 
-    # Jeopardy highlight toggle
-    highlight_jeo = st.checkbox("🔍 Highlight Jeopardy weeks (dim everything else)", value=False)
-
-    grid_html = render_schedule_html(data, level, params, highlight_jeo=highlight_jeo)
+    grid_html = render_schedule_html(data, level, params, highlight_jeo=highlight_jeo, sort_mode=sort_key)
     st.markdown(grid_html, unsafe_allow_html=True)
 
     # Export button
@@ -1509,88 +1515,109 @@ with tab1:
 
 # ── TAB 2: By Rotation ──
 with tab2:
-    st.caption("Each row is a rotation. Cells show which residents are assigned to that rotation each week. "
-               "Role letters (A/B/C) are shown where applicable.")
+    st.caption("Gantt-style view: each rotation section shows one row per resident assigned to it. "
+               "Colored cells mark weeks on that rotation; blank cells are other assignments.")
 
-    residents = data['residents']
+    br_residents = data['residents']
     role_labels = data.get('role_labels', {})
 
     # Build rotation order
     if level == "Senior":
-        rot_order = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Gold', 'Jeopardy', 'OP', 'Clinic']
+        rot_order = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Gold', 'Jeopardy']
         if t_diamond > 0:
             rot_order.insert(7, 'Diamond')
         if t_other1 > 0:
-            rot_order.insert(-3, 'IP Other 1')
+            rot_order.insert(-1, 'IP Other 1')
         if t_other2 > 0:
-            rot_order.insert(-3, 'IP Other 2')
+            rot_order.insert(-1, 'IP Other 2')
     else:
-        rot_order = ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'ICU*', 'Jeopardy', 'OP', 'Clinic']
+        rot_order = ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'ICU*', 'Jeopardy']
         if t_other1 > 0:
-            rot_order.insert(-3, 'IP Other 1')
+            rot_order.insert(-1, 'IP Other 1')
         if t_other2 > 0:
-            rot_order.insert(-3, 'IP Other 2')
+            rot_order.insert(-1, 'IP Other 2')
 
-    # Filter out OP/Clinic by default, let user toggle
-    show_op_clinic = st.checkbox("Show OP and Clinic rows", value=False)
-    if not show_op_clinic:
-        rot_order = [r for r in rot_order if r not in ('OP', 'Clinic')]
+    # For each rotation, find which residents are ever assigned to it
+    rot_residents = {}
+    for rot in rot_order:
+        rids = []
+        for r in br_residents:
+            if any(r['schedule'][w] == rot for w in range(TW)):
+                rids.append(r)
+        # Also include rotators for intern SLUH/VA/ICU*
+        if level == "Intern" and rot in ('SLUH', 'VA', 'ICU*'):
+            for rr in data.get('rotators', []):
+                if any(rr['schedule'][w] == rot for w in range(TW)):
+                    rids.append({'id': rr['id'], 'schedule': rr['schedule'],
+                                 'pgy': 0, 'type': rr.get('type', 'rotator'),
+                                 '_rotator': True})
+        rot_residents[rot] = rids
 
-    # Compact abbreviations for resident IDs in cells
-    ROLE_SHORT = {'MICU': 'MC', 'Bronze': 'BZ', 'Cards': 'CR', 'NF': 'NF'}
-
-    # Build HTML grid: rotations as rows, weeks as columns
+    # Build HTML
     html = '<div class="schedule-grid"><table>'
 
-    # Header row: weeks
-    html += '<tr><th style="min-width:65px;">Rotation</th>'
+    # Year header for 96-week
     if TW > 48:
+        html += '<tr><th colspan="2"></th>'
         html += f'<th colspan="48" class="year-hdr">Year 1 (Weeks 1–48)</th>'
         html += f'<th colspan="{TW - 48}" class="year-hdr">Year 2 (Weeks 49–{TW})</th>'
-        html += '</tr><tr><th></th>'
-    for w in range(TW):
-        html += f'<th style="min-width:50px;">{w+1}</th>'
-    html += '</tr>'
+        html += '<th></th></tr>'
 
-    # One row per rotation
+    # Week number header
+    html += '<tr><th style="min-width:60px;">Rotation</th><th style="min-width:65px;">Resident</th>'
+    for w in range(TW):
+        html += f'<th>{w+1}</th>'
+    html += '<th style="min-width:30px;">Wks</th></tr>'
+
     for rot in rot_order:
+        rids = rot_residents[rot]
+        if not rids:
+            continue
+
         bg = COLORS.get(rot, '#fff')
         fc = '#fff' if rot in DARK_BG else '#333'
         abbr = ABBREV.get(rot, rot)
-        html += f'<tr><td style="background:{bg};color:{fc};font-weight:700;white-space:nowrap;position:sticky;left:0;z-index:1;">{abbr}</td>'
+        n_res = len(rids)
 
-        for w in range(TW):
-            # Collect all residents on this rotation this week
-            assigned = []
-            for r in residents:
+        for idx, r in enumerate(rids):
+            rid = r['id']
+            is_rotator = r.get('_rotator', False)
+            wk_count = sum(1 for w in range(TW) if r['schedule'][w] == rot)
+
+            # Rotation label only on first row, spanning all rows for this rotation
+            html += '<tr>'
+            if idx == 0:
+                html += (f'<td rowspan="{n_res}" style="background:{bg};color:{fc};'
+                         f'font-weight:700;white-space:nowrap;vertical-align:middle;'
+                         f'text-align:center;position:sticky;left:0;z-index:1;'
+                         f'border-bottom:2px solid #999;">{abbr}<br>'
+                         f'<span style="font-size:8px;font-weight:400;">({n_res})</span></td>')
+
+            # Resident name
+            rid_style = 'font-style:italic;color:#888;' if is_rotator else ''
+            html += (f'<td style="text-align:left;font-size:9px;white-space:nowrap;'
+                     f'{rid_style}">{rid}</td>')
+
+            # Week cells
+            for w in range(TW):
                 if r['schedule'][w] == rot:
-                    rid = r['id']
                     letter = role_labels.get((rid, w), '')
                     if letter and rot in ROLE_LETTER_ROTS:
-                        assigned.append(f'{rid}-{letter}')
+                        short = {'MICU': 'MC', 'Bronze': 'BZ', 'Cards': 'CR', 'NF': 'NF'}
+                        txt = f'{short.get(rot, abbr[:2])}-{letter}'
                     else:
-                        assigned.append(rid)
+                        txt = abbr
+                    bdr = '2px solid #999' if idx == n_res - 1 else '1px solid #ddd'
+                    html += (f'<td style="background:{bg};color:{fc};font-size:8px;'
+                             f'text-align:center;border-bottom:{bdr};">{txt}</td>')
+                else:
+                    bdr = '2px solid #999' if idx == n_res - 1 else '1px solid #ddd'
+                    html += f'<td style="background:#fafafa;border-bottom:{bdr};"></td>'
 
-            # Also check rotators for intern SLUH/VA/ICU*
-            if level == "Intern" and rot in ('SLUH', 'VA', 'ICU*'):
-                rotators = data.get('rotators', [])
-                for rr in rotators:
-                    if rr['schedule'][w] == rot:
-                        assigned.append(f'<i>{rr["id"]}</i>')
-
-            cell_bg = bg if assigned else '#f9f9f9'
-            cell_fc = fc if assigned else '#ccc'
-            count = len(assigned)
-            # Show count badge + names
-            if assigned:
-                names = '<br>'.join(assigned)
-                html += (f'<td style="background:{cell_bg};color:{cell_fc};font-size:8px;'
-                         f'vertical-align:top;min-width:55px;padding:1px 2px;">'
-                         f'<b style="font-size:10px;">{count}</b><br>{names}</td>')
-            else:
-                html += f'<td style="background:#f9f9f9;color:#ddd;text-align:center;">—</td>'
-
-        html += '</tr>'
+            # Week count
+            bdr = '2px solid #999' if idx == n_res - 1 else '1px solid #ddd'
+            html += f'<td style="text-align:center;font-weight:600;font-size:9px;border-bottom:{bdr};">{wk_count}</td>'
+            html += '</tr>'
 
     html += '</table></div>'
     st.markdown(html, unsafe_allow_html=True)
@@ -1600,12 +1627,12 @@ with tab2:
     tgt_display = data['targets']
     tgt_html = '<div style="display:flex;gap:12px;flex-wrap:wrap;">'
     for rot in rot_order:
-        if rot in ('OP', 'Clinic', 'Jeopardy'):
+        if rot in ('Jeopardy',):
             continue
         tgt = tgt_display.get(rot, 0)
-        bg = COLORS.get(rot, '#fff')
-        fc = '#fff' if rot in DARK_BG else '#333'
-        tgt_html += (f'<span style="background:{bg};color:{fc};padding:4px 10px;'
+        rbg = COLORS.get(rot, '#fff')
+        rfc = '#fff' if rot in DARK_BG else '#333'
+        tgt_html += (f'<span style="background:{rbg};color:{rfc};padding:4px 10px;'
                      f'border-radius:4px;font-size:12px;border:1px solid #ccc;">'
                      f'{ABBREV.get(rot,rot)}: {tgt}/wk</span>')
     tgt_html += '</div>'
