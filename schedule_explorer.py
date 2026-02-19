@@ -1,6 +1,7 @@
 """
-Project Z — Schedule Explorer
+Project Z — Schedule Explorer (v16)
 Interactive Streamlit app for exploring ABC residency scheduling configurations.
+Senior schedule: 96 weeks (2 years). Intern schedule: 48 weeks (1 year).
 Deploy to Posit Connect or run locally: streamlit run schedule_explorer.py
 """
 
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
+import string
 
 # ═══════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -41,6 +43,9 @@ st.markdown("""
     .summary-hdr { background: #FFF2CC; font-weight: 700; }
     div[data-testid="stMetric"] { background: white; border: 1px solid #dfe3ea;
         border-radius: 8px; padding: 12px; }
+    .year-hdr { background: #1a3a6b; color: #FFD700; font-weight: 700;
+        font-size: 10px; text-align: center; padding: 2px 4px; }
+    .jeo-dim { opacity: 0.2; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,23 +68,51 @@ ABBREV = {
 # Text colors for dark backgrounds
 DARK_BG = {'SLUH', 'VA', 'NF', 'MICU'}
 
+# Rotations that get role letters (A, B, C...) when multiple residents on same week
+ROLE_LETTER_ROTS = {'MICU', 'Bronze', 'Cards', 'NF'}
+
 
 # ═══════════════════════════════════════════════════════════════════════
-# SENIOR SCHEDULER (exact v15 algorithm)
+# ROLE LETTER ASSIGNMENT (post-processing)
+# ═══════════════════════════════════════════════════════════════════════
+def assign_role_letters(residents, tw):
+    """Assign role letters (A, B, C...) for MICU/Bronze/Cards/NF per week.
+    Returns dict: (resident_id, week) -> letter string (e.g. 'A', 'B')
+    """
+    labels = {}
+    for w in range(tw):
+        # Group residents by rotation this week
+        rot_groups = collections.defaultdict(list)
+        for r in residents:
+            rot = r['schedule'][w]
+            if rot in ROLE_LETTER_ROTS:
+                rot_groups[rot].append(r['id'])
+        # Assign letters
+        for rot, rids in rot_groups.items():
+            sorted_rids = sorted(rids)
+            for idx, rid in enumerate(sorted_rids):
+                if len(sorted_rids) > 1:
+                    labels[(rid, w)] = string.ascii_uppercase[idx % 26]
+    return labels
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SENIOR SCHEDULER (v16: 96 weeks, min/max, stagger, ABABA post-clinic)
 # ═══════════════════════════════════════════════════════════════════════
 def build_senior(params):
-    """Build senior PGY-2/3 schedule. Returns dict with schedule, coverage, residents, stats."""
+    """Build senior PGY-2/3 schedule over 96 weeks (2 years)."""
     random.seed(params['seed'])
 
     N_PGY3 = params['n_pgy3']
     N_PGY2 = params['n_pgy2']
     N = N_PGY3 + N_PGY2
-    TW = 48
+    TW = 96
     CYCLE = params.get('clinic_freq', 6)
     MAX_CONSEC = params.get('max_consec', 3)
     WARD_LEN = params.get('ward_len', 3)
     NF_LEN = params.get('nf_len', 2)
     JEOP_CAP = params.get('jeop_cap', 4)
+    MAX_STAGGER = params.get('max_stagger', 2)
 
     TARGETS = {
         'SLUH': params['t_sluh'], 'VA': params['t_va'], 'ID': params['t_id'],
@@ -88,12 +121,20 @@ def build_senior(params):
         'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
     }
     IP_ROTS = set(TARGETS.keys()) | {'Elective'}
-    STAG_ROTS = ['MICU', 'Bronze', 'Cards']
 
-    # Remove zero-target rotations from TARGETS (but keep in IP_ROTS for consecutive-IP checking)
+    # Remove zero-target rotations from TARGETS
     TARGETS = {k: v for k, v in TARGETS.items() if v > 0}
 
     IDEAL = {rot: (tgt * TW) / max(N, 1) for rot, tgt in TARGETS.items()}
+
+    # Min/max per resident per rotation
+    MIN_PER_RES = {}
+    MAX_PER_RES = {}
+    minmax = params.get('min_max', {})
+    for rot in TARGETS:
+        ideal_val = IDEAL.get(rot, 0)
+        MIN_PER_RES[rot] = minmax.get(rot, {}).get('min', max(0, int(ideal_val * 0.4)))
+        MAX_PER_RES[rot] = minmax.get(rot, {}).get('max', int(ideal_val * 1.8) + 1)
 
     # Build residents
     residents = []
@@ -102,7 +143,7 @@ def build_senior(params):
         for i in range(n):
             residents.append({'id': f'R{pgy}_{i+1:02d}', 'pgy': pgy})
 
-    # Clinic positions
+    # Clinic positions (6 staggered positions)
     pos_counts = {p: N // 6 + (1 if (p - 1) < (N % 6) else 0) for p in range(1, 7)}
     pos_list = []
     for p in sorted(pos_counts):
@@ -114,6 +155,9 @@ def build_senior(params):
     schedule = {r['id']: [''] * TW for r in residents}
     coverage = collections.defaultdict(lambda: [0] * TW)
     res_weeks = collections.defaultdict(lambda: collections.defaultdict(int))
+
+    # Track block starts for stagger constraint
+    start_count = collections.defaultdict(lambda: [0] * TW)
 
     # Assign clinics
     for r in residents:
@@ -144,6 +188,10 @@ def build_senior(params):
                 cur = 0
         return False
 
+    def check_max(rid, rot, extra):
+        """Check if adding extra weeks would exceed per-resident max."""
+        return res_weeks[rid][rot] + extra <= MAX_PER_RES.get(rot, 999)
+
     def balance_score(rid, rot, extra_weeks=1):
         current = res_weeks[rid][rot]
         ideal = IDEAL.get(rot, 1.0)
@@ -158,7 +206,7 @@ def build_senior(params):
     for rot in ['SLUH', 'VA', 'ID']:
         BT[rot] = block_types.get(rot, 'MarioKart (3wk)')
     BT['NF'] = block_types.get('NF', '2-week')
-    for rot in STAG_ROTS:
+    for rot in ['MICU', 'Bronze', 'Cards']:
         BT[rot] = block_types.get(rot, 'ABABA (3×1wk)')
     for rot in ['Diamond', 'Gold', 'IP Other 1', 'IP Other 2']:
         BT[rot] = block_types.get(rot, '1-week')
@@ -172,22 +220,22 @@ def build_senior(params):
     def has_op_sandwich(rid, w):
         """Check that placing an IP single at week w leaves non-IP neighbors."""
         s = schedule[rid]
-        # Left neighbor: must be non-IP or edge
         if w > 0 and s[w - 1] != '' and s[w - 1] not in ('OP', 'Clinic', 'Jeopardy'):
             return False
-        # Right neighbor: must be non-IP or empty (will become OP later) or edge
         if w < TW - 1 and s[w + 1] != '' and s[w + 1] not in ('OP', 'Clinic', 'Jeopardy'):
             return False
         return True
 
-    # Pass 1: MarioKart (3wk) rotations
+    # Pass 1: MarioKart (3wk) rotations with stagger constraint
     for ward_rot in mario_kart_rots:
         target = TARGETS[ward_rot]
         for w in range(TW - WARD_LEN + 1):
             while coverage[ward_rot][w] < target:
                 cands = [r for r in residents
                          if all(is_free(r['id'], w + i) for i in range(WARD_LEN))
-                         and not would_exceed(r['id'], list(range(w, w + WARD_LEN)))]
+                         and not would_exceed(r['id'], list(range(w, w + WARD_LEN)))
+                         and check_max(r['id'], ward_rot, WARD_LEN)
+                         and start_count[ward_rot][w] < MAX_STAGGER]
                 if not cands:
                     break
                 cands.sort(key=lambda r: (balance_score(r['id'], ward_rot, WARD_LEN), random.random()))
@@ -195,15 +243,18 @@ def build_senior(params):
                 for i in range(WARD_LEN):
                     assign(rid, w + i, ward_rot)
                 res_weeks[rid][ward_rot] += WARD_LEN
+                start_count[ward_rot][w] += 1
 
-    # Pass 2: 2-week rotations
+    # Pass 2: 2-week rotations with stagger constraint
     for two_week_rot in two_week_rots:
         target = TARGETS[two_week_rot]
         for w in range(TW - NF_LEN + 1):
             while coverage[two_week_rot][w] < target:
                 cands = [r for r in residents
                          if all(is_free(r['id'], w + i) for i in range(NF_LEN))
-                         and not would_exceed(r['id'], list(range(w, w + NF_LEN)))]
+                         and not would_exceed(r['id'], list(range(w, w + NF_LEN)))
+                         and check_max(r['id'], two_week_rot, NF_LEN)
+                         and start_count[two_week_rot][w] < MAX_STAGGER]
                 if not cands:
                     break
                 cands.sort(key=lambda r: (balance_score(r['id'], two_week_rot, NF_LEN), random.random()))
@@ -211,13 +262,66 @@ def build_senior(params):
                 for i in range(NF_LEN):
                     assign(rid, w + i, two_week_rot)
                 res_weeks[rid][two_week_rot] += NF_LEN
+                start_count[two_week_rot][w] += 1
 
-    # Pass 3a: ABABA mini-blocks for ABABA rotations
-    # Place one 3-week alternating block (w, w+2, w+4) per resident per rotation
+    # Pass 3a: ABABA mini-blocks — prefer starting after clinic week
     ababa_block_rots = sorted(ababa_rots, key=lambda r: TARGETS[r])
     block_used = {r['id']: set() for r in residents}
+
+    # Build per-resident clinic week list for ABABA anchoring
+    clinic_weeks = {}
+    for r in residents:
+        clinic_weeks[r['id']] = [w for w in range(TW) if schedule[r['id']][w] == 'Clinic']
+
     for rot in ababa_block_rots:
         target = TARGETS[rot]
+        # First pass: try post-clinic anchoring
+        for r in residents:
+            if rot in block_used[r['id']]:
+                continue
+            if not check_max(r['id'], rot, 3):
+                continue
+            placed = False
+            # Try each clinic week as anchor
+            for cw in clinic_weeks[r['id']]:
+                w0 = cw + 1  # Start ABABA right after clinic
+                weeks3 = [w0, w0 + 2, w0 + 4]
+                if any(ww >= TW for ww in weeks3):
+                    continue
+                if not all(coverage[rot][ww] < target for ww in weeks3):
+                    continue
+                if not all(is_free(r['id'], ww) for ww in weeks3):
+                    continue
+                if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
+                    continue
+                if would_exceed(r['id'], weeks3):
+                    continue
+                # Place it
+                for ww in weeks3:
+                    assign(r['id'], ww, rot)
+                    res_weeks[r['id']][rot] += 1
+                block_used[r['id']].add(rot)
+                placed = True
+                break
+            # Fallback: any valid position
+            if not placed:
+                for w0 in range(TW - 4):
+                    weeks3 = [w0, w0 + 2, w0 + 4]
+                    if not all(coverage[rot][ww] < target for ww in weeks3):
+                        continue
+                    if not all(is_free(r['id'], ww) for ww in weeks3):
+                        continue
+                    if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
+                        continue
+                    if would_exceed(r['id'], weeks3):
+                        continue
+                    for ww in weeks3:
+                        assign(r['id'], ww, rot)
+                        res_weeks[r['id']][rot] += 1
+                    block_used[r['id']].add(rot)
+                    break
+
+        # Second pass: coverage-driven (fill any remaining gaps)
         for w0 in range(TW - 4):
             weeks3 = [w0, w0 + 2, w0 + 4]
             if not all(coverage[rot][ww] < target for ww in weeks3):
@@ -231,7 +335,8 @@ def build_senior(params):
                          if rot not in block_used[r['id']]
                          and all(is_free(r['id'], ww) for ww in weeks3)
                          and all(has_op_sandwich(r['id'], ww) for ww in weeks3)
-                         and not would_exceed(r['id'], weeks3)]
+                         and not would_exceed(r['id'], weeks3)
+                         and check_max(r['id'], rot, 3)]
                 if not cands:
                     break
                 cands.sort(key=lambda r: (balance_score(r['id'], rot, 3), random.random()))
@@ -252,7 +357,8 @@ def build_senior(params):
                 cands = [r for r in residents
                          if is_free(r['id'], w)
                          and has_op_sandwich(r['id'], w)
-                         and not would_exceed(r['id'], [w])]
+                         and not would_exceed(r['id'], [w])
+                         and check_max(r['id'], rot, 1)]
                 if not cands:
                     break
                 cands.sort(key=lambda r: (balance_score(r['id'], rot, 1), random.random()))
@@ -266,50 +372,50 @@ def build_senior(params):
             if schedule[r['id']][w] == '':
                 assign(r['id'], w, 'OP')
 
-    # Pass 5b: Repair — fix remaining single-week IP gaps (ABABA and 1-week rotations)
-    # First, simple OP→rot conversion.
-    all_single_rots = ababa_rots + single_rots
-    for rot in all_single_rots:
+    # Pass 5b: Repair — OP→rot conversion for ALL understaffed rotations
+    all_repair_rots = list(TARGETS.keys())
+    for rot in all_repair_rots:
+        if rot == 'Jeopardy':
+            continue
         target = TARGETS[rot]
         for w in range(TW):
             while coverage[rot][w] < target:
                 cands = [r for r in residents
                          if schedule[r['id']][w] == 'OP'
-                         and has_op_sandwich(r['id'], w)
-                         and not would_exceed(r['id'], [w])]
+                         and not would_exceed(r['id'], [w])
+                         and check_max(r['id'], rot, 1)]
                 if not cands:
                     break
-                cands.sort(key=lambda r: (balance_score(r['id'], rot, 1), random.random()))
+                # Prioritize residents below their minimum
+                cands.sort(key=lambda r: (
+                    0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    balance_score(r['id'], rot, 1), random.random()
+                ))
                 rid = cands[0]['id']
                 schedule[rid][w] = rot
                 coverage['OP'][w] -= 1
                 coverage[rot][w] += 1
                 res_weeks[rid][rot] += 1
 
-    # Pass 5c: Swap repair — for each understaffed (rot, week), find a resident
-    # who has rot on a week with surplus, and a second resident on the gap week
-    # with OP + sandwich clearance. Swap assignments.
-    for rot in all_single_rots:
+    # Pass 5c: Swap repair for ALL understaffed rotations
+    for rot in all_repair_rots:
+        if rot == 'Jeopardy':
+            continue
         target = TARGETS[rot]
         for w in range(TW):
             if coverage[rot][w] >= target:
                 continue
-            # Find surplus weeks for this rotation
             surplus_wks = [w2 for w2 in range(TW) if coverage[rot][w2] > target]
             fixed = False
             for w2 in surplus_wks:
                 if fixed:
                     break
-                # Residents doing rot at surplus week w2
                 donors = [r for r in residents if schedule[r['id']][w2] == rot]
                 for donor in donors:
                     if fixed:
                         break
                     did = donor['id']
-                    # Can this donor do rot at week w instead?
-                    if schedule[did][w] == 'OP' and has_op_sandwich(did, w) and not would_exceed(did, [w]):
-                        # Check donor can give up w2 without sandwich violation
-                        # (w2 becomes OP, which is always fine for neighbors)
+                    if schedule[did][w] == 'OP' and not would_exceed(did, [w]):
                         schedule[did][w2] = 'OP'
                         schedule[did][w] = rot
                         coverage[rot][w2] -= 1
@@ -349,28 +455,47 @@ def build_senior(params):
                 mx = max(mx, c)
             else:
                 c = 0
+        # Check min violations
+        min_violations = []
+        for rot in [rt for rt in TARGETS if rt != 'Jeopardy']:
+            if counts.get(rot, 0) < MIN_PER_RES.get(rot, 0):
+                min_violations.append(rot)
+
         res_data.append({
             'id': rid, 'pgy': r['pgy'], 'pos': r['cpos'],
             'schedule': sched, 'counts': dict(counts),
             'ip': ip, 'op': counts.get('OP', 0) + counts.get('Jeopardy', 0),
             'clinic': counts.get('Clinic', 0), 'maxConsec': mx,
+            'jeopardy': counts.get('Jeopardy', 0),
+            'min_violations': min_violations,
         })
+
+    # Sort residents by clinic position for cascade display
+    res_data.sort(key=lambda r: (r['pos'], r['id']))
+
+    # Assign role letters
+    role_labels = assign_role_letters(res_data, TW)
 
     return {
         'residents': res_data,
         'coverage': {rot: list(coverage[rot]) for rot in TARGETS},
         'targets': TARGETS,
         'fully_staffed': fully,
+        'total_weeks': TW,
         'max_consec': max((r['maxConsec'] for r in res_data), default=0),
         'violations': sum(1 for r in res_data if r['maxConsec'] > MAX_CONSEC),
+        'ideal': IDEAL,
+        'role_labels': role_labels,
+        'min_per_res': MIN_PER_RES,
+        'max_per_res': MAX_PER_RES,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# INTERN SCHEDULER (exact v3 algorithm)
+# INTERN SCHEDULER (v16: min/max, stagger, role letters, ABABA post-clinic)
 # ═══════════════════════════════════════════════════════════════════════
 def build_intern(params):
-    """Build intern PGY-1 schedule with rotators. Returns dict with all data."""
+    """Build intern PGY-1 schedule (48 weeks) with rotators."""
     random.seed(params['seed'])
 
     N_CAT = params['n_cat']
@@ -382,6 +507,7 @@ def build_intern(params):
     WARD_LEN = params.get('ward_len', 3)
     NF_LEN = params.get('nf_len', 2)
     JEOP_CAP = params.get('jeop_cap', 3)
+    MAX_STAGGER = params.get('max_stagger', 2)
 
     ALL_IP = {'SLUH', 'VA', 'NF', 'MICU', 'Cards', 'IP Other 1', 'IP Other 2'}
     STAG = ['MICU', 'Cards']
@@ -391,7 +517,7 @@ def build_intern(params):
         'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
     }
 
-    # Build block types dict from params
+    # Build block types
     block_types = params.get('block_types', {})
     BT = {}
     for rot in ['SLUH', 'VA']:
@@ -402,7 +528,6 @@ def build_intern(params):
     for rot in ['IP Other 1', 'IP Other 2']:
         BT[rot] = block_types.get(rot, '1-week')
 
-    # Identify rotations by block type
     mario_kart_rots_intern = [r for r in ['SLUH', 'VA'] if BT.get(r) == 'MarioKart (3wk)']
     two_week_rots_intern = [r for r in ['NF'] if BT.get(r) == '2-week']
     ababa_rots_intern = [r for r in STAG if BT.get(r) == 'ABABA (3×1wk)']
@@ -452,11 +577,11 @@ def build_intern(params):
         psych.append(pr)
 
     emr = []
-    em = list(range(12))
-    random.shuffle(em)
+    em_m = list(range(12))
+    random.shuffle(em_m)
     for i in range(n_em):
         er = {'id': f'EM_{i+1}', 'type': 'EM', 'schedule': [''] * TW}
-        for w in month_weeks(em[i % 12]):
+        for w in month_weeks(em_m[i % 12]):
             er['schedule'][w] = 'ICU*'
         emr.append(er)
 
@@ -483,7 +608,6 @@ def build_intern(params):
 
     positions = {r['id']: (i % 6) + 1 for i, r in enumerate(residents)}
 
-    # Remove zero-target rotations from FULL (but keep in ALL_IP for consecutive-IP checking)
     FULL = {k: v for k, v in FULL.items() if v > 0}
 
     IDEAL = {
@@ -491,14 +615,23 @@ def build_intern(params):
         'NF': FULL['NF'] * TW / max(N, 1), 'MICU': FULL['MICU'] * TW / max(N, 1),
         'Cards': FULL['Cards'] * TW / max(N, 1),
     }
-    # Add IP Other rotations to IDEAL if they have targets
     for rot in ['IP Other 1', 'IP Other 2']:
         if rot in FULL:
             IDEAL[rot] = FULL[rot] * TW / max(N, 1)
 
+    # Min/max per resident
+    MIN_PER_RES = {}
+    MAX_PER_RES = {}
+    minmax = params.get('min_max', {})
+    for rot in FULL:
+        ideal_val = IDEAL.get(rot, 0)
+        MIN_PER_RES[rot] = minmax.get(rot, {}).get('min', max(0, int(ideal_val * 0.4)))
+        MAX_PER_RES[rot] = minmax.get(rot, {}).get('max', int(ideal_val * 1.8) + 1)
+
     schedule = {r['id']: [''] * TW for r in residents}
     coverage = {rot: [0] * TW for rot in ['SLUH', 'VA', 'NF', 'MICU', 'Cards', 'IP Other 1', 'IP Other 2', 'Jeopardy']}
     rw = {r['id']: collections.Counter() for r in residents}
+    start_count = collections.defaultdict(lambda: [0] * TW)
 
     for r in residents:
         p = positions[r['id']]
@@ -529,7 +662,10 @@ def build_intern(params):
                 c = 0
         return False
 
-    avg_ip = sum(it_s + it_v) + (FULL['NF'] + FULL['MICU'] + FULL['Cards']) * TW
+    def check_max_i(rid, rot, extra):
+        return rw[rid][rot] + extra <= MAX_PER_RES.get(rot, 999)
+
+    avg_ip = sum(it_s + it_v) + (FULL.get('NF', 0) + FULL.get('MICU', 0) + FULL.get('Cards', 0)) * TW
     avg_ip /= max(N, 1)
 
     def bs(rid, rot, ew=1):
@@ -537,7 +673,6 @@ def build_intern(params):
         ideal = IDEAL.get(rot, 1.0)
         return (cur + ew) / max(ideal, 0.5) + 0.3 * sum(rw[rid][r] for r in ALL_IP) / max(avg_ip, 1)
 
-    # OP sandwich check: single-week IP must have non-IP neighbors
     def has_op_sandwich(rid, w):
         s = schedule[rid]
         if w > 0 and s[w - 1] != '' and s[w - 1] not in ('OP', 'Clinic', 'Jeopardy'):
@@ -546,48 +681,105 @@ def build_intern(params):
             return False
         return True
 
-    # Pass 1: MarioKart (3wk) rotations for interns (dynamic targets for SLUH/VA)
+    # Build per-resident clinic week list for ABABA anchoring
+    clinic_weeks_i = {}
+    for r in residents:
+        clinic_weeks_i[r['id']] = [w for w in range(TW) if schedule[r['id']][w] == 'Clinic']
+
+    # Pass 1: MarioKart (3wk) with stagger
     if 'SLUH' in mario_kart_rots_intern:
         for w in range(TW - WARD_LEN + 1):
             while coverage['SLUH'][w] < it_s[w]:
                 cs = [r for r in residents
                       if all(free(r['id'], w + i) for i in range(WARD_LEN))
-                      and not exc(r['id'], list(range(w, w + WARD_LEN)))]
+                      and not exc(r['id'], list(range(w, w + WARD_LEN)))
+                      and check_max_i(r['id'], 'SLUH', WARD_LEN)
+                      and start_count['SLUH'][w] < MAX_STAGGER]
                 if not cs:
                     break
                 cs.sort(key=lambda r: (bs(r['id'], 'SLUH', WARD_LEN), random.random()))
                 for i in range(WARD_LEN):
                     asgn(cs[0]['id'], w + i, 'SLUH')
+                start_count['SLUH'][w] += 1
 
     if 'VA' in mario_kart_rots_intern:
         for w in range(TW - WARD_LEN + 1):
             while coverage['VA'][w] < it_v[w]:
                 cs = [r for r in residents
                       if all(free(r['id'], w + i) for i in range(WARD_LEN))
-                      and not exc(r['id'], list(range(w, w + WARD_LEN)))]
+                      and not exc(r['id'], list(range(w, w + WARD_LEN)))
+                      and check_max_i(r['id'], 'VA', WARD_LEN)
+                      and start_count['VA'][w] < MAX_STAGGER]
                 if not cs:
                     break
                 cs.sort(key=lambda r: (bs(r['id'], 'VA', WARD_LEN), random.random()))
                 for i in range(WARD_LEN):
                     asgn(cs[0]['id'], w + i, 'VA')
+                start_count['VA'][w] += 1
 
-    # Pass 2: 2-week rotations for interns (NF)
+    # Pass 2: 2-week (NF) with stagger
     for w in range(TW - NF_LEN + 1):
-        while coverage['NF'][w] < FULL['NF']:
+        while coverage['NF'][w] < FULL.get('NF', 0):
             cs = [r for r in residents
                   if all(free(r['id'], w + i) for i in range(NF_LEN))
-                  and not exc(r['id'], list(range(w, w + NF_LEN)))]
+                  and not exc(r['id'], list(range(w, w + NF_LEN)))
+                  and check_max_i(r['id'], 'NF', NF_LEN)
+                  and start_count['NF'][w] < MAX_STAGGER]
             if not cs:
                 break
             cs.sort(key=lambda r: (bs(r['id'], 'NF', NF_LEN), random.random()))
             for i in range(NF_LEN):
                 asgn(cs[0]['id'], w + i, 'NF')
+            start_count['NF'][w] += 1
 
-    # Pass 3a: ABABA mini-blocks for ABABA rotations
+    # Pass 3a: ABABA mini-blocks — prefer post-clinic anchoring
     ababa_block_rots_intern = sorted(ababa_rots_intern, key=lambda r: FULL[r])
     i_block_used = {r['id']: set() for r in residents}
+
     for sr in ababa_block_rots_intern:
         tgt = FULL[sr]
+        # Per-resident post-clinic anchoring
+        for r in residents:
+            if sr in i_block_used[r['id']]:
+                continue
+            if not check_max_i(r['id'], sr, 3):
+                continue
+            placed = False
+            for cw in clinic_weeks_i[r['id']]:
+                w0 = cw + 1
+                weeks3 = [w0, w0 + 2, w0 + 4]
+                if any(ww >= TW for ww in weeks3):
+                    continue
+                if not all(coverage[sr][ww] < tgt for ww in weeks3):
+                    continue
+                if not all(free(r['id'], ww) for ww in weeks3):
+                    continue
+                if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
+                    continue
+                if exc(r['id'], weeks3):
+                    continue
+                for ww in weeks3:
+                    asgn(r['id'], ww, sr)
+                i_block_used[r['id']].add(sr)
+                placed = True
+                break
+            if not placed:
+                for w0 in range(TW - 4):
+                    weeks3 = [w0, w0 + 2, w0 + 4]
+                    if not all(coverage[sr][ww] < tgt for ww in weeks3):
+                        continue
+                    if not all(free(r['id'], ww) for ww in weeks3):
+                        continue
+                    if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
+                        continue
+                    if exc(r['id'], weeks3):
+                        continue
+                    for ww in weeks3:
+                        asgn(r['id'], ww, sr)
+                    i_block_used[r['id']].add(sr)
+                    break
+
+        # Coverage-driven fill
         for w0 in range(TW - 4):
             weeks3 = [w0, w0 + 2, w0 + 4]
             if not all(coverage[sr][ww] < tgt for ww in weeks3):
@@ -601,7 +793,8 @@ def build_intern(params):
                       if sr not in i_block_used[r['id']]
                       and all(free(r['id'], ww) for ww in weeks3)
                       and all(has_op_sandwich(r['id'], ww) for ww in weeks3)
-                      and not exc(r['id'], weeks3)]
+                      and not exc(r['id'], weeks3)
+                      and check_max_i(r['id'], sr, 3)]
                 if not cs:
                     break
                 cs.sort(key=lambda r: (bs(r['id'], sr, 3), random.random()))
@@ -611,7 +804,7 @@ def build_intern(params):
                 i_block_used[rid].add(sr)
                 placing = True
 
-    # Pass 3b: Fill remaining single-week gaps (ABABA and 1-week rotations)
+    # Pass 3b: single-week gap fill
     all_single_rots_intern = ababa_rots_intern + single_rots_intern
     for w in range(TW):
         for sr in sorted(all_single_rots_intern, key=lambda r: FULL[r]):
@@ -619,7 +812,8 @@ def build_intern(params):
             while coverage[sr][w] < tgt:
                 cs = [r for r in residents
                       if free(r['id'], w) and not exc(r['id'], [w])
-                      and has_op_sandwich(r['id'], w)]
+                      and has_op_sandwich(r['id'], w)
+                      and check_max_i(r['id'], sr, 1)]
                 if not cs:
                     break
                 cs.sort(key=lambda r: (bs(r['id'], sr, 1), random.random()))
@@ -630,6 +824,63 @@ def build_intern(params):
         for w in range(TW):
             if schedule[r['id']][w] == '':
                 schedule[r['id']][w] = 'OP'
+
+    # Pass 4b: Repair — OP→rot conversion for ALL understaffed rotations
+    # Build dynamic target lookup for SLUH/VA (intern targets are per-week)
+    intern_targets_by_week = {}
+    for rot in FULL:
+        if rot == 'SLUH':
+            intern_targets_by_week[rot] = it_s
+        elif rot == 'VA':
+            intern_targets_by_week[rot] = it_v
+        else:
+            intern_targets_by_week[rot] = [FULL[rot]] * TW
+
+    for rot in FULL:
+        if rot == 'Jeopardy':
+            continue
+        for w in range(TW):
+            tgt_w = intern_targets_by_week[rot][w]
+            while coverage[rot][w] < tgt_w:
+                cs = [r for r in residents
+                      if schedule[r['id']][w] == 'OP'
+                      and not exc(r['id'], [w])
+                      and check_max_i(r['id'], rot, 1)]
+                if not cs:
+                    break
+                cs.sort(key=lambda r: (
+                    0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    bs(r['id'], rot, 1), random.random()
+                ))
+                rid = cs[0]['id']
+                schedule[rid][w] = rot
+                rw[rid][rot] += 1
+                coverage[rot][w] += 1
+
+    # Pass 4c: Swap repair for remaining gaps
+    for rot in FULL:
+        if rot == 'Jeopardy':
+            continue
+        for w in range(TW):
+            tgt_w = intern_targets_by_week[rot][w]
+            if coverage[rot][w] >= tgt_w:
+                continue
+            surplus_wks = [w2 for w2 in range(TW) if coverage[rot][w2] > intern_targets_by_week[rot][w2]]
+            fixed = False
+            for w2 in surplus_wks:
+                if fixed:
+                    break
+                donors = [r for r in residents if schedule[r['id']][w2] == rot]
+                for donor in donors:
+                    if fixed:
+                        break
+                    did = donor['id']
+                    if schedule[did][w] == 'OP' and not exc(did, [w]):
+                        schedule[did][w2] = 'OP'
+                        schedule[did][w] = rot
+                        coverage[rot][w2] -= 1
+                        coverage[rot][w] += 1
+                        fixed = True
 
     # Pass 5: Jeopardy
     jc = {r['id']: 0 for r in residents}
@@ -646,11 +897,11 @@ def build_intern(params):
     # Stats
     FULL['Jeopardy'] = 1
     fully = sum(1 for w in range(TW) if
-                coverage['SLUH'][w] + r_sluh[w] >= FULL['SLUH'] and
-                coverage['VA'][w] + r_va[w] >= FULL['VA'] and
-                coverage['NF'][w] >= FULL['NF'] and
-                coverage['MICU'][w] >= FULL['MICU'] and
-                coverage['Cards'][w] >= FULL['Cards'] and
+                coverage['SLUH'][w] + r_sluh[w] >= FULL.get('SLUH', 0) and
+                coverage['VA'][w] + r_va[w] >= FULL.get('VA', 0) and
+                coverage['NF'][w] >= FULL.get('NF', 0) and
+                coverage['MICU'][w] >= FULL.get('MICU', 0) and
+                coverage['Cards'][w] >= FULL.get('Cards', 0) and
                 coverage['Jeopardy'][w] >= 1)
 
     res_data = []
@@ -666,12 +917,24 @@ def build_intern(params):
                 mx = max(mx, c)
             else:
                 c = 0
+        min_violations = []
+        for rot in [rt for rt in FULL if rt != 'Jeopardy']:
+            if counts.get(rot, 0) < MIN_PER_RES.get(rot, 0):
+                min_violations.append(rot)
+
         res_data.append({
             'id': rid, 'pgy': 1, 'pos': positions[rid], 'type': r['type'],
             'schedule': sched, 'counts': dict(counts),
             'ip': ip, 'op': counts.get('OP', 0) + counts.get('Jeopardy', 0),
             'clinic': counts.get('Clinic', 0), 'maxConsec': mx,
+            'jeopardy': counts.get('Jeopardy', 0),
+            'min_violations': min_violations,
         })
+
+    # Sort by clinic position for cascade display
+    res_data.sort(key=lambda r: (r['pos'], r['id']))
+
+    role_labels = assign_role_letters(res_data, TW)
 
     return {
         'residents': res_data,
@@ -680,8 +943,13 @@ def build_intern(params):
         'rotators': neuro + anes + psych + emr,
         'rotator_coverage': {'SLUH': r_sluh, 'VA': r_va},
         'fully_staffed': fully,
+        'total_weeks': TW,
         'max_consec': max((r['maxConsec'] for r in res_data), default=0),
         'violations': sum(1 for r in res_data if r['maxConsec'] > MAX_CONSEC),
+        'ideal': IDEAL,
+        'role_labels': role_labels,
+        'min_per_res': MIN_PER_RES,
+        'max_per_res': MAX_PER_RES,
     }
 
 
@@ -691,6 +959,7 @@ def build_intern(params):
 def find_best_seed(params, level, max_seed=99):
     best_seed = 0
     best_staffed = 0
+    tw = 96 if level == 'Senior' else 48
     for s in range(max_seed + 1):
         p = dict(params)
         p['seed'] = s
@@ -698,7 +967,7 @@ def find_best_seed(params, level, max_seed=99):
         if result['fully_staffed'] > best_staffed:
             best_staffed = result['fully_staffed']
             best_seed = s
-            if best_staffed == 48:
+            if best_staffed == tw:
                 break
     return best_seed, best_staffed
 
@@ -706,12 +975,13 @@ def find_best_seed(params, level, max_seed=99):
 # ═══════════════════════════════════════════════════════════════════════
 # SCHEDULE GRID HTML
 # ═══════════════════════════════════════════════════════════════════════
-def render_schedule_html(data, level, params):
-    """Render schedule as HTML table with colors."""
-    TW = 48
+def render_schedule_html(data, level, params, highlight_jeo=False):
+    """Render schedule as HTML table with colors, role letters, year headers."""
+    TW = data.get('total_weeks', 48)
     residents = data['residents']
     coverage = data['coverage']
     targets = data['targets']
+    role_labels = data.get('role_labels', {})
 
     rot_list = list(targets.keys())
     if 'Jeopardy' in rot_list:
@@ -719,11 +989,18 @@ def render_schedule_html(data, level, params):
 
     html = '<div class="schedule-grid"><table>'
 
+    # Year header row (only for 96-week senior)
+    if TW > 48:
+        html += '<tr><th></th>'
+        html += f'<th colspan="48" class="year-hdr">Year 1 (Weeks 1–48)</th>'
+        html += f'<th colspan="{TW - 48}" class="year-hdr">Year 2 (Weeks 49–{TW})</th>'
+        html += f'<th colspan="{5 + len(rot_list)}"></th></tr>'
+
     # Header
     html += '<tr><th style="min-width:65px;">Resident</th>'
     for w in range(1, TW + 1):
         html += f'<th>W{w}</th>'
-    html += '<th>IP</th><th>OP</th><th>CL</th><th>MX</th>'
+    html += '<th>IP</th><th>OP</th><th>CL</th><th>Jeo</th><th>MX</th>'
     for rot in rot_list:
         html += f'<th>{ABBREV.get(rot, rot)}</th>'
     html += '</tr>'
@@ -734,14 +1011,39 @@ def render_schedule_html(data, level, params):
         for w in range(TW):
             val = r['schedule'][w]
             bg = COLORS.get(val, '#fff')
-            txt = ABBREV.get(val, val or '')
             fc = '#fff' if val in DARK_BG else '#333'
-            html += f'<td style="background:{bg};color:{fc};font-size:8px;">{txt}</td>'
+
+            # Role letter
+            letter = role_labels.get((r['id'], w), '')
+            base_abbrev = ABBREV.get(val, val or '')
+            if letter and val in ROLE_LETTER_ROTS:
+                # Compact: MC-A, BZ-B, etc.
+                short = {'MICU': 'MC', 'Bronze': 'BZ', 'Cards': 'CR', 'NF': 'NF'}
+                txt = f'{short.get(val, base_abbrev[:2])}-{letter}'
+            else:
+                txt = base_abbrev
+
+            # Jeopardy highlight: dim non-jeopardy cells
+            dim = ''
+            if highlight_jeo and val != 'Jeopardy':
+                dim = 'opacity:0.15;'
+
+            html += f'<td style="background:{bg};color:{fc};font-size:8px;{dim}">{txt}</td>'
+
         html += f'<td>{r["ip"]}</td><td>{r["op"]}</td><td>{r["clinic"]}</td>'
+        html += f'<td>{r.get("jeopardy", 0)}</td>'
         html += f'<td style="{"background:#FFC7CE;" if r["maxConsec"] > params.get("max_consec",3) else ""}">{r["maxConsec"]}</td>'
         for rot in rot_list:
             ct = r['counts'].get(rot, 0)
-            html += f'<td>{ct}</td>'
+            # Flag if below min
+            mn = data.get('min_per_res', {}).get(rot, 0)
+            mx_r = data.get('max_per_res', {}).get(rot, 999)
+            style = ''
+            if ct < mn:
+                style = 'background:#FFC7CE;'
+            elif ct > mx_r:
+                style = 'background:#FFC7CE;'
+            html += f'<td style="{style}">{ct}</td>'
         html += '</tr>'
 
     # Rotator rows (intern only)
@@ -755,7 +1057,7 @@ def render_schedule_html(data, level, params):
             if rot_res['type'] != current_type:
                 current_type = rot_res['type']
                 label = type_labels.get(current_type, current_type)
-                html += f'<tr><td colspan="{TW + 5 + len(rot_list)}" class="section-hdr">{label} ROTATORS</td></tr>'
+                html += f'<tr><td colspan="{TW + 6 + len(rot_list)}" class="section-hdr">{label} ROTATORS</td></tr>'
             html += f'<tr><td style="text-align:left;font-style:italic;">{rot_res["id"]}</td>'
             for w in range(TW):
                 val = rot_res['schedule'][w]
@@ -765,10 +1067,10 @@ def render_schedule_html(data, level, params):
                     html += f'<td style="background:{bg};color:{fc};font-size:8px;">{ABBREV.get(val, val)}</td>'
                 else:
                     html += '<td style="background:#f0f0f0;"></td>'
-            html += f'<td colspan="{4 + len(rot_list)}"></td></tr>'
+            html += f'<td colspan="{5 + len(rot_list)}"></td></tr>'
 
     # Coverage summary
-    html += f'<tr><td colspan="{TW + 5 + len(rot_list)}" class="summary-hdr">WEEKLY COVERAGE SUMMARY</td></tr>'
+    html += f'<tr><td colspan="{TW + 6 + len(rot_list)}" class="summary-hdr">WEEKLY COVERAGE SUMMARY</td></tr>'
     cov_rots = list(targets.keys())
     for rot in cov_rots:
         tgt = targets[rot]
@@ -780,7 +1082,7 @@ def render_schedule_html(data, level, params):
             ok = count >= tgt
             bg = '#B3FFB3' if ok else '#FF9999'
             html += f'<td style="background:{bg};font-weight:600;font-size:9px;">{count}</td>'
-        html += f'<td colspan="{4 + len(rot_list)}"></td></tr>'
+        html += f'<td colspan="{5 + len(rot_list)}"></td></tr>'
 
     # OP and Clinic weekly counts
     for extra_rot in ['OP', 'Clinic']:
@@ -792,7 +1094,7 @@ def render_schedule_html(data, level, params):
         html += f'<tr><td style="text-align:left;font-weight:600;">{extra_rot}</td>'
         for w in range(TW):
             html += f'<td style="font-size:9px;">{counts[w]}</td>'
-        html += f'<td colspan="{4 + len(rot_list)}"></td></tr>'
+        html += f'<td colspan="{5 + len(rot_list)}"></td></tr>'
 
     html += '</table></div>'
     return html
@@ -804,20 +1106,26 @@ def render_schedule_html(data, level, params):
 def export_to_excel(data, level, params):
     """Export schedule data to an Excel file in memory."""
     output = io.BytesIO()
-
-    TW = 48
+    TW = data.get('total_weeks', 48)
     targets = data['targets']
+    role_labels = data.get('role_labels', {})
 
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Sheet 1: Schedule Grid
+        # Sheet 1: Schedule Grid (with role letters)
         rows = []
         for r in data['residents']:
             row = {'Resident': r['id'], 'PGY': r.get('pgy', ''), 'Position': r.get('pos', '')}
             for w in range(TW):
-                row[f'Week {w+1}'] = r['schedule'][w]
+                val = r['schedule'][w]
+                letter = role_labels.get((r['id'], w), '')
+                if letter and val in ROLE_LETTER_ROTS:
+                    row[f'Week {w+1}'] = f'{val} {letter}'
+                else:
+                    row[f'Week {w+1}'] = val
             row['IP Weeks'] = r['ip']
             row['OP Weeks'] = r['op']
             row['Clinic'] = r['clinic']
+            row['Jeopardy'] = r.get('jeopardy', 0)
             row['Max Consec'] = r['maxConsec']
             rows.append(row)
         pd.DataFrame(rows).to_excel(writer, sheet_name='Schedule', index=False)
@@ -830,7 +1138,7 @@ def export_to_excel(data, level, params):
             for w in range(TW):
                 row[f'Week {w+1}'] = vals[w]
             met = sum(1 for v in vals if v >= targets[rot])
-            row['Weeks Met'] = f'{met}/48'
+            row['Weeks Met'] = f'{met}/{TW}'
             cov_rows.append(row)
         pd.DataFrame(cov_rows).to_excel(writer, sheet_name='Coverage', index=False)
 
@@ -838,7 +1146,7 @@ def export_to_excel(data, level, params):
         bal_rows = []
         for r in data['residents']:
             row = {'Resident': r['id'], 'IP': r['ip'], 'OP': r['op'], 'Clinic': r['clinic'],
-                   'Max Consec': r['maxConsec']}
+                   'Jeopardy': r.get('jeopardy', 0), 'Max Consec': r['maxConsec']}
             for rot in sorted(targets.keys()):
                 row[rot] = r['counts'].get(rot, 0)
             bal_rows.append(row)
@@ -848,7 +1156,6 @@ def export_to_excel(data, level, params):
         param_rows = [{'Parameter': k, 'Value': str(v)} for k, v in sorted(params.items())]
         pd.DataFrame(param_rows).to_excel(writer, sheet_name='Parameters', index=False)
 
-        # Format column widths
         for sheet_name in writer.sheets:
             ws = writer.sheets[sheet_name]
             ws.column_dimensions['A'].width = 18
@@ -864,7 +1171,8 @@ def export_to_excel(data, level, params):
 st.sidebar.markdown("## Project Z — Schedule Explorer")
 st.sidebar.markdown("*ABC Model • Interactive Design Tool*")
 st.sidebar.divider()
-st.sidebar.caption("Adjust parameters below to regenerate the schedule in real-time. Use 'Find Best Seed' to optimize coverage.")
+st.sidebar.caption("Adjust parameters below to regenerate the schedule in real-time. "
+                   "Senior schedules cover 96 weeks (2 years); Intern schedules cover 48 weeks (1 year).")
 
 level = st.sidebar.radio("Schedule Level", ["Senior", "Intern"], horizontal=True)
 
@@ -887,6 +1195,7 @@ if level == "Intern":
     n_em = st.sidebar.number_input("EM", 0, 20, 8)
 
 st.sidebar.markdown("### Weekly Targets")
+st.sidebar.caption("Number of residents needed on each rotation per week.")
 if level == "Senior":
     col1, col2, col3 = st.sidebar.columns(3)
     t_sluh = col1.number_input("SLUH", 0, 15, 6)
@@ -898,7 +1207,7 @@ if level == "Senior":
     t_bronze = col6.number_input("Bronze", 0, 10, 2)
     col7, col8, col9 = st.sidebar.columns(3)
     t_cards = col7.number_input("Cards", 0, 10, 2)
-    t_diamond = col8.number_input("Diamond", 0, 5, 1)
+    t_diamond = col8.number_input("Diamond", 0, 5, 0)  # Default 0 (disabled)
     t_gold = col9.number_input("Gold", 0, 5, 1)
     col10, col11 = st.sidebar.columns(2)
     t_other1 = col10.number_input("IP Other 1", 0, 10, 0)
@@ -915,6 +1224,43 @@ else:
     t_other1 = col6.number_input("IP Other 1", 0, 10, 0, key="i_other1")
     t_other2 = col7.number_input("IP Other 2", 0, 10, 0, key="i_other2")
 
+# ── Min/Max Per Resident ──
+st.sidebar.markdown("### Min/Max Weeks Per Resident")
+st.sidebar.caption("Hard constraints: each resident must have between min and max weeks of each rotation. "
+                   "Defaults are calculated from ideal distribution.")
+
+min_max = {}
+if level == "Senior":
+    TW_display = 96
+    N_display = n_pgy3 + n_pgy2
+    active_rots = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards']
+    if t_diamond > 0:
+        active_rots.append('Diamond')
+    if t_gold > 0:
+        active_rots.append('Gold')
+    target_map = {'SLUH': t_sluh, 'VA': t_va, 'ID': t_id, 'NF': t_nf,
+                  'MICU': t_micu, 'Bronze': t_bronze, 'Cards': t_cards,
+                  'Diamond': t_diamond, 'Gold': t_gold}
+else:
+    TW_display = 48
+    N_display = n_cat + n_prelim
+    active_rots = ['SLUH', 'VA', 'NF', 'MICU', 'Cards']
+    target_map = {'SLUH': t_sluh, 'VA': t_va, 'NF': t_nf, 'MICU': t_micu, 'Cards': t_cards}
+
+for rot in active_rots:
+    tgt = target_map.get(rot, 0)
+    if tgt == 0:
+        continue
+    ideal = (tgt * TW_display) / max(N_display, 1)
+    default_min = max(0, int(ideal * 0.4))
+    default_max = int(ideal * 1.8) + 1
+    mm_cols = st.sidebar.columns(3)
+    mm_cols[0].markdown(f"**{rot}** (ideal: {ideal:.1f})")
+    mn = mm_cols[1].number_input(f"Min", 0, 50, default_min, key=f"min_{rot}")
+    mx = mm_cols[2].number_input(f"Max", 1, 50, default_max, key=f"max_{rot}")
+    min_max[rot] = {'min': mn, 'max': mx}
+
+# ── Block Types ──
 st.sidebar.markdown("### Block Types")
 st.sidebar.caption("Choose how each rotation is structured: contiguous blocks, alternating ABABA, or single weeks.")
 
@@ -922,24 +1268,21 @@ block_types = {}
 block_options = ["ABABA (3×1wk)", "MarioKart (3wk)", "2-week", "1-week"]
 
 if level == "Senior":
-    # Default block types for Senior
     defaults = {
         'SLUH': 'MarioKart (3wk)', 'VA': 'MarioKart (3wk)', 'ID': 'MarioKart (3wk)',
         'NF': '2-week',
         'MICU': 'ABABA (3×1wk)', 'Bronze': 'ABABA (3×1wk)', 'Cards': 'ABABA (3×1wk)',
         'Diamond': '1-week', 'Gold': '1-week',
     }
-    senior_rots = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold']
-
-    # 3 columns of selectboxes
     bt_col1, bt_col2, bt_col3 = st.sidebar.columns(3)
     with bt_col1:
         block_types['SLUH'] = st.selectbox("SLUH", block_options,
                                            index=block_options.index(defaults['SLUH']), key='bt_sluh')
         block_types['MICU'] = st.selectbox("MICU", block_options,
                                            index=block_options.index(defaults['MICU']), key='bt_micu')
-        block_types['Diamond'] = st.selectbox("Diamond", block_options,
-                                             index=block_options.index(defaults['Diamond']), key='bt_diamond')
+        if t_diamond > 0:
+            block_types['Diamond'] = st.selectbox("Diamond", block_options,
+                                                 index=block_options.index(defaults['Diamond']), key='bt_diamond')
     with bt_col2:
         block_types['VA'] = st.selectbox("VA", block_options,
                                          index=block_options.index(defaults['VA']), key='bt_va')
@@ -954,7 +1297,6 @@ if level == "Senior":
                                            index=block_options.index(defaults['Cards']), key='bt_cards')
         block_types['NF'] = st.selectbox("NF", block_options,
                                         index=block_options.index(defaults['NF']), key='bt_nf')
-    # Custom rotations (IP Other 1 & 2) - only show if target > 0
     if t_other1 > 0 or t_other2 > 0:
         st.sidebar.markdown("*Custom rotations*")
         o_cols = st.sidebar.columns(2)
@@ -963,14 +1305,11 @@ if level == "Senior":
         if t_other2 > 0:
             block_types['IP Other 2'] = o_cols[1].selectbox("IP Other 2", block_options, index=3, key="bt_other2")
 else:
-    # Intern level
     defaults = {
         'SLUH': 'MarioKart (3wk)', 'VA': 'MarioKart (3wk)',
         'NF': '2-week',
         'MICU': 'ABABA (3×1wk)', 'Cards': 'ABABA (3×1wk)',
     }
-    intern_rots = ['SLUH', 'VA', 'NF', 'MICU', 'Cards']
-
     bt_col1, bt_col2, bt_col3 = st.sidebar.columns(3)
     with bt_col1:
         block_types['SLUH'] = st.selectbox("SLUH", block_options,
@@ -985,7 +1324,6 @@ else:
     with bt_col3:
         block_types['NF'] = st.selectbox("NF", block_options,
                                         index=block_options.index(defaults['NF']), key='bt_nf')
-    # Custom rotations (IP Other 1 & 2) - only show if target > 0
     if t_other1 > 0 or t_other2 > 0:
         st.sidebar.markdown("*Custom rotations*")
         o_cols = st.sidebar.columns(2)
@@ -1002,9 +1340,11 @@ col_r3, col_r4 = st.sidebar.columns(2)
 max_consec = col_r3.number_input("Max consec IP", 2, 6, 3)
 jeop_cap = col_r4.number_input("Jeopardy cap", 1, 8, 4 if level == "Senior" else 3)
 clinic_freq = st.sidebar.number_input("Clinic every N weeks", 4, 8, 6)
+max_stagger = st.sidebar.number_input("Max block starts/week", 1, 10, 2,
+                                       help="Maximum residents starting a multi-week block in the same week")
 
 st.sidebar.markdown("### Seed")
-seed = st.sidebar.number_input("Random seed", 0, 9999, 18 if level == "Senior" else 6)
+seed = st.sidebar.number_input("Random seed", 0, 9999, 18 if level == "Senior" else 66)
 
 search_seed = st.sidebar.button("Find Best Seed (0-99)")
 
@@ -1017,9 +1357,11 @@ save_baseline = st.sidebar.button("Save as Baseline")
 params = {
     'seed': seed, 'max_consec': max_consec, 'ward_len': ward_len,
     'nf_len': nf_len, 'jeop_cap': jeop_cap, 'clinic_freq': clinic_freq,
+    'max_stagger': max_stagger,
     't_sluh': t_sluh, 't_va': t_va, 't_nf': t_nf, 't_micu': t_micu, 't_cards': t_cards,
     't_other1': t_other1, 't_other2': t_other2,
     'block_types': block_types,
+    'min_max': min_max,
 }
 
 if level == "Senior":
@@ -1036,9 +1378,10 @@ else:
 
 # Seed search
 if search_seed:
-    with st.spinner("Searching seeds 0-99..."):
+    tw = 96 if level == 'Senior' else 48
+    with st.spinner(f"Searching seeds 0-99 for best coverage out of {tw} weeks..."):
         best_seed, best_staffed = find_best_seed(params, level)
-    st.sidebar.success(f"Best seed: **{best_seed}** ({best_staffed}/48 staffed)")
+    st.sidebar.success(f"Best seed: **{best_seed}** ({best_staffed}/{tw} staffed)")
     params['seed'] = best_seed
     seed = best_seed
 
@@ -1047,6 +1390,8 @@ if level == "Senior":
     data = build_senior(params)
 else:
     data = build_intern(params)
+
+TW = data.get('total_weeks', 48)
 
 # Save baseline to session state
 if save_baseline:
@@ -1058,12 +1403,14 @@ if save_baseline:
 # ═══════════════════════════════════════════════════════════════════════
 # HEADER
 # ═══════════════════════════════════════════════════════════════════════
-st.markdown(f"# Project Z — {level} Schedule (PGY-{'2/3' if level == 'Senior' else '1'})")
+years_label = "2-Year" if level == "Senior" else "1-Year"
+st.markdown(f"# Project Z — {level} Schedule ({years_label}, PGY-{'2/3' if level == 'Senior' else '1'})")
 
-st.markdown("""
+st.markdown(f"""
 *Welcome to the Project Z Schedule Explorer. This tool lets you design and test ABC (X+Y+Z)
-residency schedules interactively. Adjust parameters in the sidebar, explore the generated schedule
-across tabs, and export your results.*
+residency schedules interactively. {"Senior schedules span 96 weeks (2 years)." if level == "Senior" else "Intern schedules span 48 weeks (1 year)."}
+Adjust parameters in the sidebar, explore the generated schedule across tabs, and export your results.
+Role letters (A, B, C...) distinguish residents sharing the same rotation in a given week.*
 """)
 
 # KPIs
@@ -1071,9 +1418,9 @@ n_residents = len(data['residents'])
 n_rotators = len(data.get('rotators', []))
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 k1.metric("Residents", f"{n_residents}" + (f" + {n_rotators} rotators" if n_rotators else ""))
-staffed_gaps = 48 - data['fully_staffed']
+staffed_gaps = TW - data['fully_staffed']
 staffed_msg = "Perfect!" if staffed_gaps == 0 else f"{staffed_gaps} gaps"
-k2.metric("Fully Staffed", f"{data['fully_staffed']}/48", delta=staffed_msg)
+k2.metric("Fully Staffed", f"{data['fully_staffed']}/{TW}", delta=staffed_msg)
 k3.metric("Max Consec IP", data['max_consec'],
           delta="OK" if data['max_consec'] <= max_consec else "VIOLATION",
           delta_color="normal" if data['max_consec'] <= max_consec else "inverse")
@@ -1081,7 +1428,6 @@ k4.metric("Violations", data['violations'],
           delta="None" if data['violations'] == 0 else f"{data['violations']} residents",
           delta_color="normal" if data['violations'] == 0 else "inverse")
 
-# Calculate total OP and Clinic across all residents
 total_op = sum(r['counts'].get('OP', 0) + r['counts'].get('Jeopardy', 0) for r in data['residents'])
 total_clinic = sum(r['counts'].get('Clinic', 0) for r in data['residents'])
 k5.metric("Total Clinic", total_clinic)
@@ -1096,21 +1442,17 @@ if 'manual_edits' in st.session_state:
         w = edit['week']
         new_rot = edit['rotation']
         for r in data['residents']:
-            if r['id'] == rid and 0 <= w < 48:
+            if r['id'] == rid and 0 <= w < TW:
                 old_rot = r['schedule'][w]
                 r['schedule'][w] = new_rot
-                # Update counts
                 r['counts'][old_rot] = r['counts'].get(old_rot, 0) - 1
                 r['counts'][new_rot] = r['counts'].get(new_rot, 0) + 1
-                # Update coverage
                 if old_rot in data['coverage']:
                     data['coverage'][old_rot][w] -= 1
                 if new_rot in data['coverage']:
-                    if new_rot not in data['coverage']:
-                        data['coverage'][new_rot] = [0] * 48
                     data['coverage'][new_rot][w] += 1
                 else:
-                    data['coverage'][new_rot] = [0] * 48
+                    data['coverage'][new_rot] = [0] * TW
                     data['coverage'][new_rot][w] = 1
                 break
 
@@ -1126,9 +1468,11 @@ with tab1:
     # Legend
     legend_html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">'
     if level == "Senior":
-        rots = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold', 'OP', 'Clinic', 'Jeopardy']
+        rots = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Gold', 'OP', 'Clinic', 'Jeopardy']
+        if t_diamond > 0:
+            rots.insert(7, 'Diamond')
         if t_other1 > 0:
-            rots.insert(-2, 'IP Other 1')  # Insert before OP
+            rots.insert(-2, 'IP Other 1')
         if t_other2 > 0:
             rots.insert(-2, 'IP Other 2')
     else:
@@ -1144,9 +1488,14 @@ with tab1:
     legend_html += '</div>'
     st.markdown(legend_html, unsafe_allow_html=True)
 
-    st.caption("Each row is one resident. Scroll right to see all 48 weeks. Color legend above. Coverage summary at bottom.")
+    st.caption(f"Each row is one resident (sorted by clinic position for cascade view). "
+               f"Scroll right to see all {TW} weeks. Role letters (A/B/C) distinguish residents "
+               f"on MICU, Bronze, Cards, and NF in the same week. Jeo column shows jeopardy count.")
 
-    grid_html = render_schedule_html(data, level, params)
+    # Jeopardy highlight toggle
+    highlight_jeo = st.checkbox("🔍 Highlight Jeopardy weeks (dim everything else)", value=False)
+
+    grid_html = render_schedule_html(data, level, params, highlight_jeo=highlight_jeo)
     st.markdown(grid_html, unsafe_allow_html=True)
 
     # Export button
@@ -1170,15 +1519,15 @@ with tab2:
     z_data = []
     labels = []
     for rot in rot_list:
-        vals = cov.get(rot, [0] * 48)
+        vals = cov.get(rot, [0] * TW)
         if level == "Intern" and rot in ('SLUH', 'VA') and 'rotator_coverage' in data:
-            vals = [vals[w] + data['rotator_coverage'].get(rot, [0] * 48)[w] for w in range(48)]
+            vals = [vals[w] + data['rotator_coverage'].get(rot, [0] * TW)[w] for w in range(TW)]
         z_data.append(vals)
         labels.append(rot)
 
     fig_heat = go.Figure(data=go.Heatmap(
         z=z_data,
-        x=[f'W{w+1}' for w in range(48)],
+        x=[f'W{w+1}' for w in range(TW)],
         y=labels,
         colorscale='RdYlGn',
         text=[[str(v) for v in row] for row in z_data],
@@ -1193,21 +1542,21 @@ with tab2:
     )
     st.plotly_chart(fig_heat, use_container_width=True)
 
-    # Intern: Stacked bar for SLUH/VA showing intern vs rotator
+    # Intern: Stacked bar for SLUH/VA
     if level == "Intern" and 'rotator_coverage' in data:
         st.markdown("#### SLUH & VA: Intern vs Rotator Contribution")
         for ward in ['SLUH', 'VA']:
-            intern_vals = cov.get(ward, [0] * 48)
-            rotator_vals = data['rotator_coverage'].get(ward, [0] * 48)
-            target = targets[ward]
+            intern_vals = cov.get(ward, [0] * TW)
+            rotator_vals = data['rotator_coverage'].get(ward, [0] * TW)
+            target = targets.get(ward, 0)
 
             fig_stack = go.Figure()
             fig_stack.add_trace(go.Bar(
-                x=[f'W{w+1}' for w in range(48)],
+                x=[f'W{w+1}' for w in range(TW)],
                 y=intern_vals, name='Intern', marker_color=COLORS[ward],
             ))
             fig_stack.add_trace(go.Bar(
-                x=[f'W{w+1}' for w in range(48)],
+                x=[f'W{w+1}' for w in range(TW)],
                 y=rotator_vals, name='Rotator', marker_color='#888',
             ))
             fig_stack.add_hline(y=target, line_dash='dash', line_color='red',
@@ -1222,19 +1571,23 @@ with tab2:
     st.markdown("#### Weekly Coverage Table")
     cov_df_data = {}
     for rot in rot_list:
-        vals = cov.get(rot, [0] * 48)
+        vals = cov.get(rot, [0] * TW)
         if level == "Intern" and rot in ('SLUH', 'VA') and 'rotator_coverage' in data:
-            vals = [vals[w] + data['rotator_coverage'].get(rot, [0] * 48)[w] for w in range(48)]
+            vals = [vals[w] + data['rotator_coverage'].get(rot, [0] * TW)[w] for w in range(TW)]
         cov_df_data[rot] = vals
-    cov_df = pd.DataFrame(cov_df_data, index=[f'W{w+1}' for w in range(48)])
+    cov_df = pd.DataFrame(cov_df_data, index=[f'W{w+1}' for w in range(TW)])
     st.dataframe(cov_df.T, use_container_width=True)
 
 # ── TAB 3: Balance & Fairness ──
 with tab3:
-    st.caption("These charts show how evenly rotations are distributed across residents. Outliers (>1.5 SD from mean) are flagged below.")
+    st.caption("These charts show how evenly rotations are distributed across residents. "
+               "Outliers (>1.5 SD from mean) are flagged below. "
+               "Red-highlighted cells in the schedule grid indicate residents below their minimum or above their maximum.")
 
-    ip_rots = (set(['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold'])
+    ip_rots = (set(['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Gold'])
                if level == "Senior" else set(['SLUH', 'VA', 'NF', 'MICU', 'Cards']))
+    if level == "Senior" and t_diamond > 0:
+        ip_rots.add('Diamond')
     rot_list_bal = sorted(ip_rots)
 
     # IP histogram
@@ -1279,12 +1632,27 @@ with tab3:
     else:
         st.success("No outliers detected — excellent balance!")
 
+    # Min constraint violations
+    min_viol_residents = [r for r in data['residents'] if r.get('min_violations')]
+    if min_viol_residents:
+        st.markdown("#### ⚠️ Residents Below Minimum Weeks")
+        min_viol_data = []
+        for r in min_viol_residents:
+            for rot in r['min_violations']:
+                min_viol_data.append({
+                    'Resident': r['id'],
+                    'Rotation': rot,
+                    'Actual': r['counts'].get(rot, 0),
+                    'Minimum': data.get('min_per_res', {}).get(rot, 0),
+                })
+        st.dataframe(pd.DataFrame(min_viol_data), use_container_width=True, hide_index=True)
+
     # Sortable comparison table
     st.markdown("#### Per-Resident Rotation Counts")
     table_data = []
     for r in data['residents']:
         row = {'Resident': r['id'], 'IP': r['ip'], 'OP': r['op'], 'Clinic': r['clinic'],
-               'MaxConsec': r['maxConsec']}
+               'Jeopardy': r.get('jeopardy', 0), 'MaxConsec': r['maxConsec']}
         for rot in rot_list_bal:
             row[rot] = r['counts'].get(rot, 0)
         table_data.append(row)
@@ -1299,6 +1667,7 @@ with tab4:
     else:
         bl = st.session_state['baseline']
         bl_params = st.session_state['baseline_params']
+        bl_tw = bl.get('total_weeks', 48)
 
         st.markdown("### Baseline vs Current")
 
@@ -1307,7 +1676,7 @@ with tab4:
         delta_consec = data['max_consec'] - bl['max_consec']
         delta_viol = data['violations'] - bl['violations']
 
-        c1.metric("Fully Staffed", f"{data['fully_staffed']}/48",
+        c1.metric("Fully Staffed", f"{data['fully_staffed']}/{TW}",
                   delta=f"{delta_staffed:+d}" if delta_staffed != 0 else "Same")
         c2.metric("Max Consec IP", data['max_consec'],
                   delta=f"{delta_consec:+d}" if delta_consec != 0 else "Same",
@@ -1316,7 +1685,6 @@ with tab4:
                   delta=f"{delta_viol:+d}" if delta_viol != 0 else "Same",
                   delta_color="inverse")
 
-        # Parameter changes
         st.markdown("#### Parameter Changes")
         changes = []
         for key in sorted(set(list(bl_params.keys()) + list(params.keys()))):
@@ -1329,13 +1697,12 @@ with tab4:
         else:
             st.info("No parameter changes detected.")
 
-        # Coverage comparison
         st.markdown("#### Coverage Comparison")
         targets_list = [r for r in data['targets'] if r != 'Jeopardy']
         comp_data = []
         for rot in targets_list:
-            bl_vals = bl['coverage'].get(rot, [0] * 48)
-            cur_vals = data['coverage'].get(rot, [0] * 48)
+            bl_vals = bl['coverage'].get(rot, [0] * bl_tw)
+            cur_vals = data['coverage'].get(rot, [0] * TW)
             bl_tgt = bl['targets'].get(rot, 0)
             cur_tgt = data['targets'].get(rot, 0)
 
@@ -1346,8 +1713,8 @@ with tab4:
                 'Rotation': rot,
                 'Baseline Target': bl_tgt,
                 'Current Target': cur_tgt,
-                'Baseline Weeks Met': f'{bl_met}/48',
-                'Current Weeks Met': f'{cur_met}/48',
+                'Baseline Weeks Met': f'{bl_met}/{bl_tw}',
+                'Current Weeks Met': f'{cur_met}/{TW}',
                 'Change': f'{cur_met - bl_met:+d}',
             })
         st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
@@ -1357,19 +1724,19 @@ with tab5:
     st.markdown("### Manual Schedule Adjustments")
     st.caption("Changes are applied on top of the generated schedule. They persist until you click 'Clear All Edits' or refresh the page.")
 
-    # Store edits in session state
     if 'manual_edits' not in st.session_state:
         st.session_state['manual_edits'] = []
 
-    # Input form
     with st.form("edit_form"):
         ec1, ec2, ec3 = st.columns(3)
         resident_ids = [r['id'] for r in data['residents']]
         edit_resident = ec1.selectbox("Resident", resident_ids)
-        edit_week = ec2.number_input("Week", 1, 48, 1)
+        edit_week = ec2.number_input("Week", 1, TW, 1)
 
         if level == "Senior":
-            rot_options = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Diamond', 'Gold', 'OP', 'Jeopardy']
+            rot_options = ['SLUH', 'VA', 'ID', 'NF', 'MICU', 'Bronze', 'Cards', 'Gold', 'OP', 'Jeopardy']
+            if t_diamond > 0:
+                rot_options.insert(7, 'Diamond')
             if t_other1 > 0:
                 rot_options.insert(-1, 'IP Other 1')
             if t_other2 > 0:
@@ -1386,12 +1753,11 @@ with tab5:
         if submitted:
             st.session_state['manual_edits'].append({
                 'resident': edit_resident,
-                'week': edit_week - 1,  # 0-indexed
+                'week': edit_week - 1,
                 'rotation': edit_rot,
             })
             st.rerun()
 
-    # Show and apply edits
     if st.session_state['manual_edits']:
         st.markdown("#### Pending Edits")
         edits_df = pd.DataFrame([
