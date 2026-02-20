@@ -1438,7 +1438,8 @@ def find_best_seed(params, level, max_seed=99):
 # ═══════════════════════════════════════════════════════════════════════
 # SCHEDULE GRID HTML
 # ═══════════════════════════════════════════════════════════════════════
-def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='clinic'):
+def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='clinic',
+                         highlight_violations=False):
     """Render schedule as HTML table with colors, role letters, year headers."""
     TW = data.get('total_weeks', 48)
     residents = list(data['residents'])
@@ -1447,6 +1448,64 @@ def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='cl
     coverage = data['coverage']
     targets = data['targets']
     role_labels = data.get('role_labels', {})
+
+    # Pre-compute violation cells if highlighting is on
+    viol_cells = {}  # (resident_id, week) -> list of violation types
+    if highlight_violations:
+        ip_window = params.get('ip_window', 6)
+        max_ip_win = params.get('max_ip_win', 3)
+        nf_min_gap = params.get('nf_min_gap', 6)
+        ip_rots = (set(targets.keys()) - {'Jeopardy'}) | {'Elective'}
+
+        for r in residents:
+            rid = r['id']
+            sched = r['schedule']
+
+            # IP window violations: mark all IP cells in any window exceeding limit
+            for start in range(TW - ip_window + 1):
+                ip_wks = [w for w in range(start, start + ip_window) if sched[w] in ip_rots]
+                if len(ip_wks) > max_ip_win:
+                    for w in ip_wks:
+                        viol_cells.setdefault((rid, w), set()).add('ipw')
+
+            # NF gap violations: NF blocks too close together
+            nf_blocks = []
+            w = 0
+            while w < TW:
+                if sched[w] == 'NF':
+                    blk_start = w
+                    while w < TW and sched[w] == 'NF':
+                        w += 1
+                    nf_blocks.append((blk_start, w - 1))
+                else:
+                    w += 1
+            for i in range(len(nf_blocks) - 1):
+                gap = nf_blocks[i + 1][0] - nf_blocks[i][1] - 1
+                if gap < nf_min_gap - 1:
+                    for bw in range(nf_blocks[i][0], nf_blocks[i][1] + 1):
+                        viol_cells.setdefault((rid, bw), set()).add('nfgap')
+                    for bw in range(nf_blocks[i + 1][0], nf_blocks[i + 1][1] + 1):
+                        viol_cells.setdefault((rid, bw), set()).add('nfgap')
+
+            # NF adjacency violations: NF next to non-NF IP
+            for w in range(TW):
+                if sched[w] == 'NF':
+                    if w > 0 and sched[w - 1] in ip_rots and sched[w - 1] != 'NF':
+                        viol_cells.setdefault((rid, w), set()).add('nfadj')
+                        viol_cells.setdefault((rid, w - 1), set()).add('nfadj')
+                    if w < TW - 1 and sched[w + 1] in ip_rots and sched[w + 1] != 'NF':
+                        viol_cells.setdefault((rid, w), set()).add('nfadj')
+                        viol_cells.setdefault((rid, w + 1), set()).add('nfadj')
+
+            # Jeopardy buffer violations: jeopardy next to IP
+            for w in range(TW):
+                if sched[w] == 'Jeopardy':
+                    if w > 0 and sched[w - 1] in ip_rots:
+                        viol_cells.setdefault((rid, w), set()).add('jeobuf')
+                        viol_cells.setdefault((rid, w - 1), set()).add('jeobuf')
+                    if w < TW - 1 and sched[w + 1] in ip_rots:
+                        viol_cells.setdefault((rid, w), set()).add('jeobuf')
+                        viol_cells.setdefault((rid, w + 1), set()).add('jeobuf')
 
     rot_list = list(targets.keys())
     if 'Jeopardy' in rot_list:
@@ -1493,7 +1552,16 @@ def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='cl
             if highlight_jeo and val != 'Jeopardy':
                 dim = 'opacity:0.15;'
 
-            html += f'<td style="background:{bg};color:{fc};font-size:8px;{dim}">{txt}</td>'
+            # Violation highlight: red border + slight dim on non-violation cells
+            viol_style = ''
+            if highlight_violations:
+                cell_viols = viol_cells.get((r['id'], w))
+                if cell_viols:
+                    viol_style = 'outline:2px solid red;outline-offset:-2px;z-index:1;position:relative;'
+                else:
+                    viol_style = 'opacity:0.25;'
+
+            html += f'<td style="background:{bg};color:{fc};font-size:8px;{dim}{viol_style}">{txt}</td>'
 
         html += f'<td>{r["ip"]}</td><td>{r["op"]}</td><td>{r["clinic"]}</td>'
         html += f'<td>{r.get("jeopardy", 0)}</td>'
@@ -1965,17 +2033,24 @@ with tab1:
     st.markdown(legend_html, unsafe_allow_html=True)
 
     # Sort and highlight controls
-    ctrl1, ctrl2 = st.columns(2)
+    ctrl1, ctrl2, ctrl3 = st.columns(3)
     sort_mode = ctrl1.selectbox("Sort residents by", ["Clinic position (cascade)", "PGY / Resident ID"],
                                  index=0)
     sort_key = 'clinic' if 'Clinic' in sort_mode else 'pgy_id'
     highlight_jeo = ctrl2.checkbox("Highlight Jeopardy weeks (dim everything else)", value=False)
+    highlight_viol = ctrl3.checkbox("Highlight constraint violations", value=False)
 
-    st.caption(f"Each row is one resident. "
-               f"Scroll right to see all {TW} weeks. Role letters (A/B/C) distinguish residents "
-               f"on MICU, Bronze, Cards, and NF in the same week. Jeo column shows jeopardy count.")
+    if highlight_viol:
+        st.caption("**Violation highlighting ON** — Red-outlined cells indicate constraint violations. "
+                   "Types: IP window (>3 IP in 6wk), NF gap (<6wk apart), NF adjacent to IP, "
+                   "Jeopardy adjacent to IP. Non-violation cells are dimmed.")
+    else:
+        st.caption(f"Each row is one resident. "
+                   f"Scroll right to see all {TW} weeks. Role letters (A/B/C) distinguish residents "
+                   f"on MICU, Bronze, Cards, and NF in the same week. Jeo column shows jeopardy count.")
 
-    grid_html = render_schedule_html(data, level, params, highlight_jeo=highlight_jeo, sort_mode=sort_key)
+    grid_html = render_schedule_html(data, level, params, highlight_jeo=highlight_jeo,
+                                     sort_mode=sort_key, highlight_violations=highlight_viol)
     st.markdown(grid_html, unsafe_allow_html=True)
 
     # Export button
