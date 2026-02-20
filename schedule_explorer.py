@@ -120,7 +120,7 @@ def build_senior(params):
         'Cards': params['t_cards'], 'Diamond': params['t_diamond'], 'Gold': params['t_gold'],
         'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
     }
-    IP_ROTS = set(TARGETS.keys()) | {'Elective'}
+    IP_ROTS = (set(TARGETS.keys()) - {'Jeopardy'}) | {'Elective'}
 
     # Remove zero-target rotations from TARGETS
     TARGETS = {k: v for k, v in TARGETS.items() if v > 0}
@@ -174,19 +174,86 @@ def build_senior(params):
         schedule[rid][w] = rot
         coverage[rot][w] += 1
 
-    def would_exceed(rid, weeks_to_fill):
+    # ── Scheduling quality parameters ──
+    IP_WINDOW = params.get('ip_window', 6)       # sliding window size
+    MAX_IP_WIN = params.get('max_ip_win', 3)     # max IP weeks in any window
+    NF_MIN_GAP = params.get('nf_min_gap', 6)     # min weeks between NF blocks
+    LOW_PRIO_ROTS = {'IP Other 1', 'IP Other 2'}  # lower-priority rotations
+
+    def ip_window_ok(rid, weeks_to_fill, relaxed=False):
+        """Check that placing IP in weeks_to_fill keeps every 6-wk window ≤ limit.
+           If relaxed=True, allows MAX_IP_WIN + 1 (for repair passes)."""
+        limit = MAX_IP_WIN + 1 if relaxed else MAX_IP_WIN
         temp = list(schedule[rid])
         for w in weeks_to_fill:
             temp[w] = 'IP'
-        cur = 0
-        for w in range(TW):
-            if temp[w] in IP_ROTS or temp[w] == 'IP':
-                cur += 1
-                if cur > MAX_CONSEC:
-                    return True
-            else:
-                cur = 0
-        return False
+        for start in range(max(0, min(weeks_to_fill) - IP_WINDOW + 1),
+                           min(TW - IP_WINDOW + 1, max(weeks_to_fill) + 1)):
+            count = sum(1 for w in range(start, start + IP_WINDOW)
+                        if temp[w] in IP_ROTS or temp[w] == 'IP')
+            if count > limit:
+                return False
+        return True
+
+    def nf_gap_ok(rid, weeks_to_fill):
+        """Check that NF placement respects minimum gap from existing NF blocks."""
+        for w in weeks_to_fill:
+            for w2 in range(max(0, w - NF_MIN_GAP + 1), min(TW, w + NF_MIN_GAP)):
+                if w2 not in weeks_to_fill and schedule[rid][w2] == 'NF':
+                    return False
+        return True
+
+    def nf_not_adjacent_ip(rid, weeks_to_fill):
+        """Check that NF weeks are not directly adjacent to other IP rotations."""
+        for w in weeks_to_fill:
+            if w > 0:
+                nb = schedule[rid][w - 1]
+                if nb in IP_ROTS and nb != 'NF' and (w - 1) not in weeks_to_fill:
+                    return False
+            if w < TW - 1:
+                nb = schedule[rid][w + 1]
+                if nb in IP_ROTS and nb != 'NF' and (w + 1) not in weeks_to_fill:
+                    return False
+        return True
+
+    def nf_adjacency_ok(rid, w, rot):
+        """Check that placing rot at w doesn't create NF-IP adjacency.
+           If rot is NF, neighbors can't be other IP.
+           If rot is non-NF IP, neighbors can't be NF."""
+        s = schedule[rid]
+        if rot == 'NF':
+            if w > 0 and s[w - 1] in IP_ROTS and s[w - 1] != 'NF':
+                return False
+            if w < TW - 1 and s[w + 1] in IP_ROTS and s[w + 1] != 'NF':
+                return False
+        elif rot in IP_ROTS:
+            if w > 0 and s[w - 1] == 'NF':
+                return False
+            if w < TW - 1 and s[w + 1] == 'NF':
+                return False
+        return True
+
+    def jeo_buffer_ok(rid, w):
+        """Check that jeopardy at week w is not directly adjacent to IP."""
+        s = schedule[rid]
+        if w > 0 and s[w - 1] in IP_ROTS:
+            return False
+        if w < TW - 1 and s[w + 1] in IP_ROTS:
+            return False
+        return True
+
+    def micu_cl_sandwich(rid, weeks_to_fill, rot):
+        """Soft check: avoid MICU weeks sandwiching a Clinic week."""
+        if rot != 'MICU':
+            return True  # only applies to MICU
+        s = schedule[rid]
+        for w in weeks_to_fill:
+            # Check if this MICU week is adjacent to Clinic that's adjacent to another MICU
+            if w > 1 and s[w - 1] == 'Clinic' and (s[w - 2] == 'MICU' or (w - 2) in weeks_to_fill):
+                return False
+            if w < TW - 2 and s[w + 1] == 'Clinic' and (s[w + 2] == 'MICU' or (w + 2) in weeks_to_fill):
+                return False
+        return True
 
     def check_max(rid, rot, extra):
         """Check if adding extra weeks would exceed per-resident max."""
@@ -198,7 +265,11 @@ def build_senior(params):
         rot_excess = (current + extra_weeks) / max(ideal, 0.5)
         total_ip = sum(res_weeks[rid][r] for r in TARGETS)
         ideal_mean_ip = sum(TARGETS.values()) * TW / max(N, 1)
-        return rot_excess + 0.3 * total_ip / max(ideal_mean_ip, 1)
+        base = rot_excess + 0.3 * total_ip / max(ideal_mean_ip, 1)
+        # Lower-priority rotations score higher = less preferred for early filling
+        if rot in LOW_PRIO_ROTS:
+            base += 5.0
+        return base
 
     # Build block types dict from params
     block_types = params.get('block_types', {})
@@ -233,7 +304,7 @@ def build_senior(params):
             while coverage[ward_rot][w] < target:
                 cands = [r for r in residents
                          if all(is_free(r['id'], w + i) for i in range(WARD_LEN))
-                         and not would_exceed(r['id'], list(range(w, w + WARD_LEN)))
+                         and ip_window_ok(r['id'], list(range(w, w + WARD_LEN)))
                          and check_max(r['id'], ward_rot, WARD_LEN)
                          and start_count[ward_rot][w] < MAX_STAGGER]
                 if not cands:
@@ -250,11 +321,13 @@ def build_senior(params):
         target = TARGETS[two_week_rot]
         for w in range(TW - NF_LEN + 1):
             while coverage[two_week_rot][w] < target:
+                wks = list(range(w, w + NF_LEN))
                 cands = [r for r in residents
                          if all(is_free(r['id'], w + i) for i in range(NF_LEN))
-                         and not would_exceed(r['id'], list(range(w, w + NF_LEN)))
+                         and ip_window_ok(r['id'], wks)
                          and check_max(r['id'], two_week_rot, NF_LEN)
-                         and start_count[two_week_rot][w] < MAX_STAGGER]
+                         and start_count[two_week_rot][w] < MAX_STAGGER
+                         and (two_week_rot != 'NF' or (nf_gap_ok(r['id'], wks) and nf_not_adjacent_ip(r['id'], wks)))]
                 if not cands:
                     break
                 cands.sort(key=lambda r: (balance_score(r['id'], two_week_rot, NF_LEN), random.random()))
@@ -294,7 +367,9 @@ def build_senior(params):
                     continue
                 if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
                     continue
-                if would_exceed(r['id'], weeks3):
+                if not ip_window_ok(r['id'], weeks3):
+                    continue
+                if not micu_cl_sandwich(r['id'], weeks3, rot):
                     continue
                 # Place it
                 for ww in weeks3:
@@ -313,7 +388,9 @@ def build_senior(params):
                         continue
                     if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
                         continue
-                    if would_exceed(r['id'], weeks3):
+                    if not ip_window_ok(r['id'], weeks3):
+                        continue
+                    if not micu_cl_sandwich(r['id'], weeks3, rot):
                         continue
                     for ww in weeks3:
                         assign(r['id'], ww, rot)
@@ -335,7 +412,8 @@ def build_senior(params):
                          if rot not in block_used[r['id']]
                          and all(is_free(r['id'], ww) for ww in weeks3)
                          and all(has_op_sandwich(r['id'], ww) for ww in weeks3)
-                         and not would_exceed(r['id'], weeks3)
+                         and ip_window_ok(r['id'], weeks3)
+                         and micu_cl_sandwich(r['id'], weeks3, rot)
                          and check_max(r['id'], rot, 3)]
                 if not cands:
                     break
@@ -357,7 +435,7 @@ def build_senior(params):
                 cands = [r for r in residents
                          if is_free(r['id'], w)
                          and has_op_sandwich(r['id'], w)
-                         and not would_exceed(r['id'], [w])
+                         and ip_window_ok(r['id'], [w])
                          and check_max(r['id'], rot, 1)]
                 if not cands:
                     break
@@ -382,11 +460,12 @@ def build_senior(params):
             while coverage[rot][w] < target:
                 cands = [r for r in residents
                          if schedule[r['id']][w] == 'OP'
-                         and not would_exceed(r['id'], [w])
+                         and ip_window_ok(r['id'], [w])
+                         and nf_adjacency_ok(r['id'], w, rot)
+                         and (rot != 'NF' or nf_gap_ok(r['id'], [w]))
                          and check_max(r['id'], rot, 1)]
                 if not cands:
                     break
-                # Prioritize residents below their minimum
                 cands.sort(key=lambda r: (
                     0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
                     balance_score(r['id'], rot, 1), random.random()
@@ -415,7 +494,9 @@ def build_senior(params):
                     if fixed:
                         break
                     did = donor['id']
-                    if schedule[did][w] == 'OP' and not would_exceed(did, [w]):
+                    if (schedule[did][w] == 'OP' and ip_window_ok(did, [w])
+                            and nf_adjacency_ok(did, w, rot)
+                            and (rot != 'NF' or nf_gap_ok(did, [w]))):
                         schedule[did][w2] = 'OP'
                         schedule[did][w] = rot
                         coverage[rot][w2] -= 1
@@ -424,11 +505,67 @@ def build_senior(params):
                         coverage['OP'][w] -= 1
                         fixed = True
 
-    # Pass 6: Jeopardy
+    # Pass 5d: Relaxed repair — allow MAX_IP_WIN+1 as last resort for coverage
+    for rot in all_repair_rots:
+        if rot == 'Jeopardy':
+            continue
+        target = TARGETS[rot]
+        for w in range(TW):
+            while coverage[rot][w] < target:
+                cands = [r for r in residents
+                         if schedule[r['id']][w] == 'OP'
+                         and ip_window_ok(r['id'], [w], relaxed=True)
+                         and check_max(r['id'], rot, 1)]
+                if not cands:
+                    break
+                cands.sort(key=lambda r: (
+                    0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    balance_score(r['id'], rot, 1), random.random()
+                ))
+                rid = cands[0]['id']
+                schedule[rid][w] = rot
+                coverage['OP'][w] -= 1
+                coverage[rot][w] += 1
+                res_weeks[rid][rot] += 1
+
+    # Pass 5e: Relaxed swap repair
+    for rot in all_repair_rots:
+        if rot == 'Jeopardy':
+            continue
+        target = TARGETS[rot]
+        for w in range(TW):
+            if coverage[rot][w] >= target:
+                continue
+            surplus_wks = [w2 for w2 in range(TW) if coverage[rot][w2] > target]
+            fixed = False
+            for w2 in surplus_wks:
+                if fixed:
+                    break
+                donors = [r for r in residents if schedule[r['id']][w2] == rot]
+                for donor in donors:
+                    if fixed:
+                        break
+                    did = donor['id']
+                    if schedule[did][w] == 'OP' and ip_window_ok(did, [w], relaxed=True):
+                        schedule[did][w2] = 'OP'
+                        schedule[did][w] = rot
+                        coverage[rot][w2] -= 1
+                        coverage[rot][w] += 1
+                        coverage['OP'][w2] += 1
+                        coverage['OP'][w] -= 1
+                        fixed = True
+
+    # Pass 6: Jeopardy — prefer slots not adjacent to IP
     jeop_counts = collections.defaultdict(int)
     for w in range(TW):
+        # First try: OP slots with buffer from IP
         pool = [(r, jeop_counts[r['id']]) for r in residents
-                if schedule[r['id']][w] == 'OP' and jeop_counts[r['id']] < JEOP_CAP]
+                if schedule[r['id']][w] == 'OP' and jeop_counts[r['id']] < JEOP_CAP
+                and jeo_buffer_ok(r['id'], w)]
+        if not pool:
+            # Fallback: any OP slot (relax jeo buffer)
+            pool = [(r, jeop_counts[r['id']]) for r in residents
+                    if schedule[r['id']][w] == 'OP' and jeop_counts[r['id']] < JEOP_CAP]
         if pool:
             pool.sort(key=lambda x: (x[1], random.random()))
             chosen = pool[0][0]
@@ -448,6 +585,7 @@ def build_senior(params):
         sched = schedule[rid]
         counts = collections.Counter(sched)
         ip = sum(1 for s in sched if s in IP_ROTS)
+        # Max consecutive IP
         mx = c = 0
         for s in sched:
             if s in IP_ROTS:
@@ -455,6 +593,11 @@ def build_senior(params):
                 mx = max(mx, c)
             else:
                 c = 0
+        # Max IP in any 6-week window
+        max_win = 0
+        for start in range(TW - IP_WINDOW + 1):
+            wc = sum(1 for w2 in range(start, start + IP_WINDOW) if sched[w2] in IP_ROTS)
+            max_win = max(max_win, wc)
         # Check min violations
         min_violations = []
         for rot in [rt for rt in TARGETS if rt != 'Jeopardy']:
@@ -466,6 +609,7 @@ def build_senior(params):
             'schedule': sched, 'counts': dict(counts),
             'ip': ip, 'op': counts.get('OP', 0) + counts.get('Jeopardy', 0),
             'clinic': counts.get('Clinic', 0), 'maxConsec': mx,
+            'maxIPWin': max_win,
             'jeopardy': counts.get('Jeopardy', 0),
             'min_violations': min_violations,
         })
@@ -483,7 +627,9 @@ def build_senior(params):
         'fully_staffed': fully,
         'total_weeks': TW,
         'max_consec': max((r['maxConsec'] for r in res_data), default=0),
-        'violations': sum(1 for r in res_data if r['maxConsec'] > MAX_CONSEC),
+        'violations': sum(1 for r in res_data if r['maxIPWin'] > MAX_IP_WIN),
+        'ip_window': IP_WINDOW,
+        'max_ip_win': MAX_IP_WIN,
         'ideal': IDEAL,
         'role_labels': role_labels,
         'min_per_res': MIN_PER_RES,
@@ -648,19 +794,76 @@ def build_intern(params):
         rw[rid][rot] += 1
         coverage[rot][w] += 1
 
-    def exc(rid, wks):
-        t = schedule[rid][:]
-        for w in wks:
-            t[w] = 'X'
-        c = 0
-        for w in range(TW):
-            if t[w] in ALL_IP or t[w] == 'X':
-                c += 1
-                if c > MAX_CONSEC:
-                    return True
-            else:
-                c = 0
-        return False
+    # ── Scheduling quality parameters ──
+    IP_WINDOW = params.get('ip_window', 6)
+    MAX_IP_WIN = params.get('max_ip_win', 3)
+    NF_MIN_GAP = params.get('nf_min_gap', 6)
+    LOW_PRIO_ROTS = {'IP Other 1', 'IP Other 2'}
+
+    def ip_window_ok(rid, weeks_to_fill, relaxed=False):
+        limit = MAX_IP_WIN + 1 if relaxed else MAX_IP_WIN
+        temp = list(schedule[rid])
+        for w in weeks_to_fill:
+            temp[w] = 'IP'
+        for start in range(max(0, min(weeks_to_fill) - IP_WINDOW + 1),
+                           min(TW - IP_WINDOW + 1, max(weeks_to_fill) + 1)):
+            count = sum(1 for w in range(start, start + IP_WINDOW)
+                        if temp[w] in ALL_IP or temp[w] == 'IP')
+            if count > limit:
+                return False
+        return True
+
+    def nf_gap_ok(rid, weeks_to_fill):
+        for w in weeks_to_fill:
+            for w2 in range(max(0, w - NF_MIN_GAP + 1), min(TW, w + NF_MIN_GAP)):
+                if w2 not in weeks_to_fill and schedule[rid][w2] == 'NF':
+                    return False
+        return True
+
+    def nf_not_adjacent_ip(rid, weeks_to_fill):
+        for w in weeks_to_fill:
+            if w > 0:
+                nb = schedule[rid][w - 1]
+                if nb in ALL_IP and nb != 'NF' and (w - 1) not in weeks_to_fill:
+                    return False
+            if w < TW - 1:
+                nb = schedule[rid][w + 1]
+                if nb in ALL_IP and nb != 'NF' and (w + 1) not in weeks_to_fill:
+                    return False
+        return True
+
+    def nf_adjacency_ok(rid, w, rot):
+        s = schedule[rid]
+        if rot == 'NF':
+            if w > 0 and s[w - 1] in ALL_IP and s[w - 1] != 'NF':
+                return False
+            if w < TW - 1 and s[w + 1] in ALL_IP and s[w + 1] != 'NF':
+                return False
+        elif rot in ALL_IP:
+            if w > 0 and s[w - 1] == 'NF':
+                return False
+            if w < TW - 1 and s[w + 1] == 'NF':
+                return False
+        return True
+
+    def jeo_buffer_ok(rid, w):
+        s = schedule[rid]
+        if w > 0 and s[w - 1] in ALL_IP:
+            return False
+        if w < TW - 1 and s[w + 1] in ALL_IP:
+            return False
+        return True
+
+    def micu_cl_sandwich(rid, weeks_to_fill, rot):
+        if rot != 'MICU':
+            return True
+        s = schedule[rid]
+        for w in weeks_to_fill:
+            if w > 1 and s[w - 1] == 'Clinic' and (s[w - 2] == 'MICU' or (w - 2) in weeks_to_fill):
+                return False
+            if w < TW - 2 and s[w + 1] == 'Clinic' and (s[w + 2] == 'MICU' or (w + 2) in weeks_to_fill):
+                return False
+        return True
 
     def check_max_i(rid, rot, extra):
         return rw[rid][rot] + extra <= MAX_PER_RES.get(rot, 999)
@@ -671,7 +874,10 @@ def build_intern(params):
     def bs(rid, rot, ew=1):
         cur = rw[rid][rot]
         ideal = IDEAL.get(rot, 1.0)
-        return (cur + ew) / max(ideal, 0.5) + 0.3 * sum(rw[rid][r] for r in ALL_IP) / max(avg_ip, 1)
+        base = (cur + ew) / max(ideal, 0.5) + 0.3 * sum(rw[rid][r] for r in ALL_IP) / max(avg_ip, 1)
+        if rot in LOW_PRIO_ROTS:
+            base += 5.0
+        return base
 
     def has_op_sandwich(rid, w):
         s = schedule[rid]
@@ -692,7 +898,7 @@ def build_intern(params):
             while coverage['SLUH'][w] < it_s[w]:
                 cs = [r for r in residents
                       if all(free(r['id'], w + i) for i in range(WARD_LEN))
-                      and not exc(r['id'], list(range(w, w + WARD_LEN)))
+                      and ip_window_ok(r['id'], list(range(w, w + WARD_LEN)))
                       and check_max_i(r['id'], 'SLUH', WARD_LEN)
                       and start_count['SLUH'][w] < MAX_STAGGER]
                 if not cs:
@@ -707,7 +913,7 @@ def build_intern(params):
             while coverage['VA'][w] < it_v[w]:
                 cs = [r for r in residents
                       if all(free(r['id'], w + i) for i in range(WARD_LEN))
-                      and not exc(r['id'], list(range(w, w + WARD_LEN)))
+                      and ip_window_ok(r['id'], list(range(w, w + WARD_LEN)))
                       and check_max_i(r['id'], 'VA', WARD_LEN)
                       and start_count['VA'][w] < MAX_STAGGER]
                 if not cs:
@@ -717,14 +923,17 @@ def build_intern(params):
                     asgn(cs[0]['id'], w + i, 'VA')
                 start_count['VA'][w] += 1
 
-    # Pass 2: 2-week (NF) with stagger
+    # Pass 2: 2-week (NF) with stagger + NF gap/adjacency checks
     for w in range(TW - NF_LEN + 1):
         while coverage['NF'][w] < FULL.get('NF', 0):
+            wks = list(range(w, w + NF_LEN))
             cs = [r for r in residents
                   if all(free(r['id'], w + i) for i in range(NF_LEN))
-                  and not exc(r['id'], list(range(w, w + NF_LEN)))
+                  and ip_window_ok(r['id'], wks)
                   and check_max_i(r['id'], 'NF', NF_LEN)
-                  and start_count['NF'][w] < MAX_STAGGER]
+                  and start_count['NF'][w] < MAX_STAGGER
+                  and nf_gap_ok(r['id'], wks)
+                  and nf_not_adjacent_ip(r['id'], wks)]
             if not cs:
                 break
             cs.sort(key=lambda r: (bs(r['id'], 'NF', NF_LEN), random.random()))
@@ -732,7 +941,7 @@ def build_intern(params):
                 asgn(cs[0]['id'], w + i, 'NF')
             start_count['NF'][w] += 1
 
-    # Pass 3a: ABABA mini-blocks — prefer post-clinic anchoring
+    # Pass 3a: ABABA mini-blocks — prefer post-clinic anchoring + MICU sandwich avoidance
     ababa_block_rots_intern = sorted(ababa_rots_intern, key=lambda r: FULL[r])
     i_block_used = {r['id']: set() for r in residents}
 
@@ -756,7 +965,9 @@ def build_intern(params):
                     continue
                 if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
                     continue
-                if exc(r['id'], weeks3):
+                if not ip_window_ok(r['id'], weeks3):
+                    continue
+                if not micu_cl_sandwich(r['id'], weeks3, sr):
                     continue
                 for ww in weeks3:
                     asgn(r['id'], ww, sr)
@@ -772,7 +983,9 @@ def build_intern(params):
                         continue
                     if not all(has_op_sandwich(r['id'], ww) for ww in weeks3):
                         continue
-                    if exc(r['id'], weeks3):
+                    if not ip_window_ok(r['id'], weeks3):
+                        continue
+                    if not micu_cl_sandwich(r['id'], weeks3, sr):
                         continue
                     for ww in weeks3:
                         asgn(r['id'], ww, sr)
@@ -793,7 +1006,8 @@ def build_intern(params):
                       if sr not in i_block_used[r['id']]
                       and all(free(r['id'], ww) for ww in weeks3)
                       and all(has_op_sandwich(r['id'], ww) for ww in weeks3)
-                      and not exc(r['id'], weeks3)
+                      and ip_window_ok(r['id'], weeks3)
+                      and micu_cl_sandwich(r['id'], weeks3, sr)
                       and check_max_i(r['id'], sr, 3)]
                 if not cs:
                     break
@@ -811,8 +1025,9 @@ def build_intern(params):
             tgt = FULL[sr]
             while coverage[sr][w] < tgt:
                 cs = [r for r in residents
-                      if free(r['id'], w) and not exc(r['id'], [w])
+                      if free(r['id'], w)
                       and has_op_sandwich(r['id'], w)
+                      and ip_window_ok(r['id'], [w])
                       and check_max_i(r['id'], sr, 1)]
                 if not cs:
                     break
@@ -844,7 +1059,9 @@ def build_intern(params):
             while coverage[rot][w] < tgt_w:
                 cs = [r for r in residents
                       if schedule[r['id']][w] == 'OP'
-                      and not exc(r['id'], [w])
+                      and ip_window_ok(r['id'], [w])
+                      and nf_adjacency_ok(r['id'], w, rot)
+                      and (rot != 'NF' or nf_gap_ok(r['id'], [w]))
                       and check_max_i(r['id'], rot, 1)]
                 if not cs:
                     break
@@ -875,17 +1092,69 @@ def build_intern(params):
                     if fixed:
                         break
                     did = donor['id']
-                    if schedule[did][w] == 'OP' and not exc(did, [w]):
+                    if (schedule[did][w] == 'OP' and ip_window_ok(did, [w])
+                            and nf_adjacency_ok(did, w, rot)
+                            and (rot != 'NF' or nf_gap_ok(did, [w]))):
                         schedule[did][w2] = 'OP'
                         schedule[did][w] = rot
                         coverage[rot][w2] -= 1
                         coverage[rot][w] += 1
                         fixed = True
 
-    # Pass 5: Jeopardy
+    # Pass 4d: Relaxed repair — allow MAX_IP_WIN+1 as last resort
+    for rot in FULL:
+        if rot == 'Jeopardy':
+            continue
+        for w in range(TW):
+            tgt_w = intern_targets_by_week[rot][w]
+            while coverage[rot][w] < tgt_w:
+                cs = [r for r in residents
+                      if schedule[r['id']][w] == 'OP'
+                      and ip_window_ok(r['id'], [w], relaxed=True)
+                      and check_max_i(r['id'], rot, 1)]
+                if not cs:
+                    break
+                cs.sort(key=lambda r: (
+                    0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    bs(r['id'], rot, 1), random.random()
+                ))
+                rid = cs[0]['id']
+                schedule[rid][w] = rot
+                rw[rid][rot] += 1
+                coverage[rot][w] += 1
+
+    # Pass 4e: Relaxed swap repair
+    for rot in FULL:
+        if rot == 'Jeopardy':
+            continue
+        for w in range(TW):
+            tgt_w = intern_targets_by_week[rot][w]
+            if coverage[rot][w] >= tgt_w:
+                continue
+            surplus_wks = [w2 for w2 in range(TW) if coverage[rot][w2] > intern_targets_by_week[rot][w2]]
+            fixed = False
+            for w2 in surplus_wks:
+                if fixed:
+                    break
+                donors = [r for r in residents if schedule[r['id']][w2] == rot]
+                for donor in donors:
+                    if fixed:
+                        break
+                    did = donor['id']
+                    if schedule[did][w] == 'OP' and ip_window_ok(did, [w], relaxed=True):
+                        schedule[did][w2] = 'OP'
+                        schedule[did][w] = rot
+                        coverage[rot][w2] -= 1
+                        coverage[rot][w] += 1
+                        fixed = True
+
+    # Pass 5: Jeopardy — prefer slots not adjacent to IP
     jc = {r['id']: 0 for r in residents}
     for w in range(TW):
-        cs = [r for r in residents if schedule[r['id']][w] == 'OP' and jc[r['id']] < JEOP_CAP]
+        cs = [r for r in residents if schedule[r['id']][w] == 'OP' and jc[r['id']] < JEOP_CAP
+              and jeo_buffer_ok(r['id'], w)]
+        if not cs:
+            cs = [r for r in residents if schedule[r['id']][w] == 'OP' and jc[r['id']] < JEOP_CAP]
         if cs:
             cs.sort(key=lambda r: (jc[r['id']], random.random()))
             rid = cs[0]['id']
@@ -917,6 +1186,11 @@ def build_intern(params):
                 mx = max(mx, c)
             else:
                 c = 0
+        # Max IP weeks in any sliding window
+        max_win = 0
+        for start in range(TW - IP_WINDOW + 1):
+            wc = sum(1 for w2 in range(start, start + IP_WINDOW) if sched[w2] in ALL_IP)
+            max_win = max(max_win, wc)
         min_violations = []
         for rot in [rt for rt in FULL if rt != 'Jeopardy']:
             if counts.get(rot, 0) < MIN_PER_RES.get(rot, 0):
@@ -927,6 +1201,7 @@ def build_intern(params):
             'schedule': sched, 'counts': dict(counts),
             'ip': ip, 'op': counts.get('OP', 0) + counts.get('Jeopardy', 0),
             'clinic': counts.get('Clinic', 0), 'maxConsec': mx,
+            'maxIPWin': max_win,
             'jeopardy': counts.get('Jeopardy', 0),
             'min_violations': min_violations,
         })
@@ -945,7 +1220,9 @@ def build_intern(params):
         'fully_staffed': fully,
         'total_weeks': TW,
         'max_consec': max((r['maxConsec'] for r in res_data), default=0),
-        'violations': sum(1 for r in res_data if r['maxConsec'] > MAX_CONSEC),
+        'violations': sum(1 for r in res_data if r['maxIPWin'] > MAX_IP_WIN),
+        'ip_window': IP_WINDOW,
+        'max_ip_win': MAX_IP_WIN,
         'ideal': IDEAL,
         'role_labels': role_labels,
         'min_per_res': MIN_PER_RES,
@@ -1002,7 +1279,7 @@ def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='cl
     html += '<tr><th style="min-width:65px;">Resident</th>'
     for w in range(1, TW + 1):
         html += f'<th>W{w}</th>'
-    html += '<th>IP</th><th>OP</th><th>CL</th><th>Jeo</th><th>MX</th>'
+    html += '<th>IP</th><th>OP</th><th>CL</th><th>Jeo</th><th>IPW</th>'
     for rot in rot_list:
         html += f'<th>{ABBREV.get(rot, rot)}</th>'
     html += '</tr>'
@@ -1034,7 +1311,9 @@ def render_schedule_html(data, level, params, highlight_jeo=False, sort_mode='cl
 
         html += f'<td>{r["ip"]}</td><td>{r["op"]}</td><td>{r["clinic"]}</td>'
         html += f'<td>{r.get("jeopardy", 0)}</td>'
-        html += f'<td style="{"background:#FFC7CE;" if r["maxConsec"] > params.get("max_consec",3) else ""}">{r["maxConsec"]}</td>'
+        mxw = r.get('maxIPWin', r.get('maxConsec', 0))
+        ip_lim = params.get('max_ip_win', 3)
+        html += f'<td style="{"background:#FFC7CE;" if mxw > ip_lim else ""}">{mxw}</td>'
         for rot in rot_list:
             ct = r['counts'].get(rot, 0)
             # Flag if below min
@@ -1344,9 +1623,16 @@ jeop_cap = col_r4.number_input("Jeopardy cap", 1, 8, 4 if level == "Senior" else
 clinic_freq = st.sidebar.number_input("Clinic every N weeks", 4, 8, 6)
 max_stagger = st.sidebar.number_input("Max block starts/week", 1, 10, 2,
                                        help="Maximum residents starting a multi-week block in the same week")
+col_r5, col_r6 = st.sidebar.columns(2)
+ip_window = col_r5.number_input("IP window (wks)", 4, 12, 6,
+                                 help="Sliding window size for IP cap check")
+max_ip_win = col_r6.number_input("Max IP in window", 2, 6, 3,
+                                  help="Max inpatient weeks allowed in any window")
+nf_min_gap = st.sidebar.number_input("Min weeks between NF blocks", 2, 12, 6,
+                                      help="Minimum gap between Night Float blocks for same resident")
 
 st.sidebar.markdown("### Seed")
-seed = st.sidebar.number_input("Random seed", 0, 9999, 18 if level == "Senior" else 66)
+seed = st.sidebar.number_input("Random seed", 0, 9999, 18 if level == "Senior" else 55)
 
 search_seed = st.sidebar.button("Find Best Seed (0-99)")
 
@@ -1359,7 +1645,8 @@ save_baseline = st.sidebar.button("Save as Baseline")
 params = {
     'seed': seed, 'max_consec': max_consec, 'ward_len': ward_len,
     'nf_len': nf_len, 'jeop_cap': jeop_cap, 'clinic_freq': clinic_freq,
-    'max_stagger': max_stagger,
+    'max_stagger': max_stagger, 'ip_window': ip_window,
+    'max_ip_win': max_ip_win, 'nf_min_gap': nf_min_gap,
     't_sluh': t_sluh, 't_va': t_va, 't_nf': t_nf, 't_micu': t_micu, 't_cards': t_cards,
     't_other1': t_other1, 't_other2': t_other2,
     'block_types': block_types,
@@ -1423,10 +1710,11 @@ k1.metric("Residents", f"{n_residents}" + (f" + {n_rotators} rotators" if n_rota
 staffed_gaps = TW - data['fully_staffed']
 staffed_msg = "Perfect!" if staffed_gaps == 0 else f"{staffed_gaps} gaps"
 k2.metric("Fully Staffed", f"{data['fully_staffed']}/{TW}", delta=staffed_msg)
-k3.metric("Max Consec IP", data['max_consec'],
-          delta="OK" if data['max_consec'] <= max_consec else "VIOLATION",
-          delta_color="normal" if data['max_consec'] <= max_consec else "inverse")
-k4.metric("Violations", data['violations'],
+max_ip_w = data.get('max_ip_win', max_ip_win)
+k3.metric(f"Max IP/{ip_window}wk", max((r.get('maxIPWin', r.get('maxConsec', 0)) for r in data['residents']), default=0),
+          delta="OK" if data['violations'] == 0 else "VIOLATION",
+          delta_color="normal" if data['violations'] == 0 else "inverse")
+k4.metric("IP Window Violations", data['violations'],
           delta="None" if data['violations'] == 0 else f"{data['violations']} residents",
           delta_color="normal" if data['violations'] == 0 else "inverse")
 
