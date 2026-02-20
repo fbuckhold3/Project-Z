@@ -1495,7 +1495,7 @@ if level == "Senior":
     t_other2 = col11.number_input("IP Other 2", 0, 10, 0)
 else:
     col1, col2 = st.sidebar.columns(2)
-    t_sluh = col1.number_input("SLUH (total)", 0, 15, 4)
+    t_sluh = col1.number_input("SLUH (total)", 0, 15, 8)
     t_va = col2.number_input("VA (total)", 0, 15, 5)
     col3, col4, col5 = st.sidebar.columns(3)
     t_nf = col3.number_input("NF", 0, 15, 4)
@@ -1632,7 +1632,7 @@ nf_min_gap = st.sidebar.number_input("Min weeks between NF blocks", 2, 12, 6,
                                       help="Minimum gap between Night Float blocks for same resident")
 
 st.sidebar.markdown("### Seed")
-seed = st.sidebar.number_input("Random seed", 0, 9999, 18 if level == "Senior" else 55)
+seed = st.sidebar.number_input("Random seed", 0, 9999, 18 if level == "Senior" else 0)
 
 search_seed = st.sidebar.button("Find Best Seed (0-99)")
 
@@ -1800,6 +1800,60 @@ with tab1:
         file_name=f"Project_Z_{level}_Schedule.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    # ── Rules & Update Log ──
+    st.divider()
+    rule_col, log_col = st.columns(2)
+
+    with rule_col:
+        st.markdown("#### Scheduling Rules")
+        ip_w = params.get('ip_window', 6)
+        mx_ip = params.get('max_ip_win', 3)
+        nf_g = params.get('nf_min_gap', 6)
+        st.markdown(f"""
+- **IP Window Cap**: Max **{mx_ip}** inpatient weeks in any **{ip_w}**-week window
+- **NF Spacing**: Night Float blocks must be at least **{nf_g} weeks** apart
+- **NF Adjacency**: Night Float cannot be directly adjacent to other inpatient rotations
+- **Jeopardy Buffer**: Jeopardy weeks should not be adjacent to inpatient rotations
+- **MICU Sandwich**: Avoid MICU on both sides of a Clinic week when possible
+- **IP Other Priority**: IP Other rotations are filled last (lower scheduling priority)
+- **Clinic Cycle**: Clinic every **{params.get('clinic_freq', 6)}** weeks, staggered across **6** positions
+- **Block Stagger**: Max **{params.get('max_stagger', 2)}** residents starting the same multi-week block per week
+- **Min/Max Per Resident**: Each resident has per-rotation min/max week constraints
+""")
+
+    with log_col:
+        st.markdown("#### Update Log")
+        st.markdown("""
+**v16g** (Feb 2026)
+- Added IP window cap (max 3 IP per 6-wk window) — hard constraint with relaxed repair fallback
+- Added NF proximity rule (min 6 weeks between NF blocks)
+- Added NF adjacency rule (NF not next to other IP)
+- Added jeopardy buffer (not adjacent to IP)
+- Added MICU-Clinic-MICU sandwich avoidance
+- IP Other rotations scheduled at lower priority
+- New sidebar controls for IP window, NF gap parameters
+- Intern SLUH target corrected to 8 (inclusive of rotators)
+
+**v16f** (Feb 2026)
+- By Rotation tab: Gantt-style with fixed row per resident
+- Sort dropdown on Schedule Grid (clinic cascade vs PGY/ID)
+
+**v16e** (Feb 2026)
+- 96-week senior schedule, min/max per-resident constraints
+- Block stagger limit, cascade display, ABABA post-clinic anchoring
+- Role letter assignments, jeopardy tracking
+- Diamond default = 0, Gold rotation added
+
+**v16d** (Jan 2026)
+- Intern scheduler with rotator integration (neuro, anesthesia, psych, EM)
+- Coverage & Staffing tab, Balance & Fairness tab
+- Compare tab with baseline save/restore
+
+**v16c** (Jan 2026)
+- Initial build: senior + intern greedy schedulers
+- Streamlit deployment via Posit Connect Cloud
+""")
 
 # ── TAB 2: By Rotation ──
 with tab2:
