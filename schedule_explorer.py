@@ -450,8 +450,103 @@ def build_senior(params):
             if schedule[r['id']][w] == '':
                 assign(r['id'], w, 'OP')
 
-    # Pass 5b: Repair — OP→rot conversion for ALL understaffed rotations
+    # Pass 5b: Block-aware repair — try full blocks before single weeks
     all_repair_rots = list(TARGETS.keys())
+
+    # 5b-i: MarioKart repair (SLUH, VA — 3-week contiguous blocks)
+    for rot in [r for r in all_repair_rots if BT.get(r) == 'MarioKart (3wk)']:
+        target = TARGETS[rot]
+        for w in range(TW - WARD_LEN + 1):
+            wks = list(range(w, w + WARD_LEN))
+            if not all(coverage[rot][ww] < target for ww in wks):
+                continue
+            placed = True
+            while placed:
+                placed = False
+                if not all(coverage[rot][ww] < target for ww in wks):
+                    break
+                cands = [r for r in residents
+                         if all(schedule[r['id']][ww] == 'OP' for ww in wks)
+                         and ip_window_ok(r['id'], wks)
+                         and check_max(r['id'], rot, WARD_LEN)]
+                if not cands:
+                    break
+                cands.sort(key=lambda r: (
+                    0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    balance_score(r['id'], rot, WARD_LEN), random.random()
+                ))
+                rid = cands[0]['id']
+                for ww in wks:
+                    schedule[rid][ww] = rot
+                    coverage['OP'][ww] -= 1
+                    coverage[rot][ww] += 1
+                    res_weeks[rid][rot] += 1
+                placed = True
+
+    # 5b-ii: 2-week repair (NF)
+    for rot in [r for r in all_repair_rots if BT.get(r) == '2-week']:
+        target = TARGETS[rot]
+        for w in range(TW - NF_LEN + 1):
+            wks = list(range(w, w + NF_LEN))
+            if not all(coverage[rot][ww] < target for ww in wks):
+                continue
+            placed = True
+            while placed:
+                placed = False
+                if not all(coverage[rot][ww] < target for ww in wks):
+                    break
+                cands = [r for r in residents
+                         if all(schedule[r['id']][ww] == 'OP' for ww in wks)
+                         and ip_window_ok(r['id'], wks)
+                         and nf_gap_ok(r['id'], wks)
+                         and nf_not_adjacent_ip(r['id'], wks)
+                         and check_max(r['id'], rot, NF_LEN)]
+                if not cands:
+                    break
+                cands.sort(key=lambda r: (
+                    0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    balance_score(r['id'], rot, NF_LEN), random.random()
+                ))
+                rid = cands[0]['id']
+                for ww in wks:
+                    schedule[rid][ww] = rot
+                    coverage['OP'][ww] -= 1
+                    coverage[rot][ww] += 1
+                    res_weeks[rid][rot] += 1
+                placed = True
+
+    # 5b-iii: ABABA repair (MICU, Bronze, Cards — 3×1wk pattern)
+    for rot in [r for r in all_repair_rots if BT.get(r) == 'ABABA (3×1wk)' and r != 'Jeopardy']:
+        target = TARGETS[rot]
+        for w0 in range(TW - 4):
+            weeks3 = [w0, w0 + 2, w0 + 4]
+            if not all(coverage[rot][ww] < target for ww in weeks3):
+                continue
+            placed = True
+            while placed:
+                placed = False
+                if not all(coverage[rot][ww] < target for ww in weeks3):
+                    break
+                cands = [r for r in residents
+                         if all(schedule[r['id']][ww] == 'OP' for ww in weeks3)
+                         and ip_window_ok(r['id'], weeks3)
+                         and micu_cl_sandwich(r['id'], weeks3, rot)
+                         and check_max(r['id'], rot, 3)]
+                if not cands:
+                    break
+                cands.sort(key=lambda r: (
+                    0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    balance_score(r['id'], rot, 3), random.random()
+                ))
+                rid = cands[0]['id']
+                for ww in weeks3:
+                    schedule[rid][ww] = rot
+                    coverage['OP'][ww] -= 1
+                    coverage[rot][ww] += 1
+                    res_weeks[rid][rot] += 1
+                placed = True
+
+    # Pass 5c: Single-week repair — fill remaining gaps one week at a time
     for rot in all_repair_rots:
         if rot == 'Jeopardy':
             continue
@@ -476,7 +571,7 @@ def build_senior(params):
                 coverage[rot][w] += 1
                 res_weeks[rid][rot] += 1
 
-    # Pass 5c: Swap repair for ALL understaffed rotations
+    # Pass 5d: Swap repair for ALL understaffed rotations
     for rot in all_repair_rots:
         if rot == 'Jeopardy':
             continue
@@ -505,7 +600,7 @@ def build_senior(params):
                         coverage['OP'][w] -= 1
                         fixed = True
 
-    # Pass 5d: Relaxed repair — allow MAX_IP_WIN+1 as last resort for coverage
+    # Pass 5e: Relaxed repair — allow MAX_IP_WIN+1 as last resort for coverage
     for rot in all_repair_rots:
         if rot == 'Jeopardy':
             continue
@@ -528,7 +623,7 @@ def build_senior(params):
                 coverage[rot][w] += 1
                 res_weeks[rid][rot] += 1
 
-    # Pass 5e: Relaxed swap repair
+    # Pass 5f: Relaxed swap repair
     for rot in all_repair_rots:
         if rot == 'Jeopardy':
             continue
@@ -1040,7 +1135,7 @@ def build_intern(params):
             if schedule[r['id']][w] == '':
                 schedule[r['id']][w] = 'OP'
 
-    # Pass 4b: Repair — OP→rot conversion for ALL understaffed rotations
+    # Pass 4b: Block-aware repair — try full blocks before single weeks
     # Build dynamic target lookup for SLUH/VA (intern targets are per-week)
     intern_targets_by_week = {}
     for rot in FULL:
@@ -1051,6 +1146,97 @@ def build_intern(params):
         else:
             intern_targets_by_week[rot] = [FULL[rot]] * TW
 
+    # 4b-i: MarioKart repair (SLUH, VA — 3-week contiguous blocks)
+    for rot in [r for r in FULL if BT.get(r) == 'MarioKart (3wk)']:
+        for w in range(TW - WARD_LEN + 1):
+            wks = list(range(w, w + WARD_LEN))
+            tgts = [intern_targets_by_week[rot][ww] for ww in wks]
+            if not all(coverage[rot][ww] < tgts[i] for i, ww in enumerate(wks)):
+                continue
+            p = True
+            while p:
+                p = False
+                if not all(coverage[rot][ww] < intern_targets_by_week[rot][ww] for ww in wks):
+                    break
+                cs = [r for r in residents
+                      if all(schedule[r['id']][ww] == 'OP' for ww in wks)
+                      and ip_window_ok(r['id'], wks)
+                      and check_max_i(r['id'], rot, WARD_LEN)]
+                if not cs:
+                    break
+                cs.sort(key=lambda r: (
+                    0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    bs(r['id'], rot, WARD_LEN), random.random()
+                ))
+                rid = cs[0]['id']
+                for ww in wks:
+                    schedule[rid][ww] = rot
+                    rw[rid][rot] += 1
+                    coverage[rot][ww] += 1
+                p = True
+
+    # 4b-ii: 2-week repair (NF)
+    for rot in [r for r in FULL if BT.get(r) == '2-week']:
+        tgt = FULL[rot]
+        for w in range(TW - NF_LEN + 1):
+            wks = list(range(w, w + NF_LEN))
+            if not all(coverage[rot][ww] < tgt for ww in wks):
+                continue
+            p = True
+            while p:
+                p = False
+                if not all(coverage[rot][ww] < tgt for ww in wks):
+                    break
+                cs = [r for r in residents
+                      if all(schedule[r['id']][ww] == 'OP' for ww in wks)
+                      and ip_window_ok(r['id'], wks)
+                      and nf_gap_ok(r['id'], wks)
+                      and nf_not_adjacent_ip(r['id'], wks)
+                      and check_max_i(r['id'], rot, NF_LEN)]
+                if not cs:
+                    break
+                cs.sort(key=lambda r: (
+                    0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    bs(r['id'], rot, NF_LEN), random.random()
+                ))
+                rid = cs[0]['id']
+                for ww in wks:
+                    schedule[rid][ww] = rot
+                    rw[rid][rot] += 1
+                    coverage[rot][ww] += 1
+                p = True
+
+    # 4b-iii: ABABA repair (MICU, Cards — 3×1wk pattern)
+    for rot in [r for r in FULL if BT.get(r) == 'ABABA (3×1wk)' and r != 'Jeopardy']:
+        tgt = FULL[rot]
+        for w0 in range(TW - 4):
+            weeks3 = [w0, w0 + 2, w0 + 4]
+            if not all(coverage[rot][ww] < tgt for ww in weeks3):
+                continue
+            p = True
+            while p:
+                p = False
+                if not all(coverage[rot][ww] < tgt for ww in weeks3):
+                    break
+                cs = [r for r in residents
+                      if all(schedule[r['id']][ww] == 'OP' for ww in weeks3)
+                      and ip_window_ok(r['id'], weeks3)
+                      and micu_cl_sandwich(r['id'], weeks3, rot)
+                      and check_max_i(r['id'], rot, 3)]
+                if not cs:
+                    break
+                cs.sort(key=lambda r: (
+                    0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                    bs(r['id'], rot, 3), random.random()
+                ))
+                rid = cs[0]['id']
+                for ww in weeks3:
+                    schedule[rid][ww] = rot
+                    rw[rid][rot] += 1
+                    coverage[rot][ww] += 1
+                p = True
+
+    # Pass 4c: Single-week repair — fill remaining gaps one week at a time
     for rot in FULL:
         if rot == 'Jeopardy':
             continue
@@ -1074,7 +1260,7 @@ def build_intern(params):
                 rw[rid][rot] += 1
                 coverage[rot][w] += 1
 
-    # Pass 4c: Swap repair for remaining gaps
+    # Pass 4d: Swap repair for remaining gaps
     for rot in FULL:
         if rot == 'Jeopardy':
             continue
@@ -1101,7 +1287,7 @@ def build_intern(params):
                         coverage[rot][w] += 1
                         fixed = True
 
-    # Pass 4d: Relaxed repair — allow MAX_IP_WIN+1 as last resort
+    # Pass 4e: Relaxed repair — allow MAX_IP_WIN+1 as last resort
     for rot in FULL:
         if rot == 'Jeopardy':
             continue
@@ -1123,7 +1309,7 @@ def build_intern(params):
                 rw[rid][rot] += 1
                 coverage[rot][w] += 1
 
-    # Pass 4e: Relaxed swap repair
+    # Pass 4f: Relaxed swap repair
     for rot in FULL:
         if rot == 'Jeopardy':
             continue
@@ -1811,7 +1997,8 @@ with tab1:
         mx_ip = params.get('max_ip_win', 3)
         nf_g = params.get('nf_min_gap', 6)
         st.markdown(f"""
-- **IP Window Cap**: Max **{mx_ip}** inpatient weeks in any **{ip_w}**-week window
+- **Block Structure**: SLUH/VA as 3-week contiguous blocks; MICU/Bronze/Cards as ABABA (3×1wk); NF as 2-week blocks — same rules for seniors and interns
+- **IP Window Cap**: Max **{mx_ip}** inpatient weeks in any **{ip_w}**-week window (hard constraint)
 - **NF Spacing**: Night Float blocks must be at least **{nf_g} weeks** apart
 - **NF Adjacency**: Night Float cannot be directly adjacent to other inpatient rotations
 - **Jeopardy Buffer**: Jeopardy weeks should not be adjacent to inpatient rotations
@@ -1819,12 +2006,19 @@ with tab1:
 - **IP Other Priority**: IP Other rotations are filled last (lower scheduling priority)
 - **Clinic Cycle**: Clinic every **{params.get('clinic_freq', 6)}** weeks, staggered across **6** positions
 - **Block Stagger**: Max **{params.get('max_stagger', 2)}** residents starting the same multi-week block per week
+- **Block Integrity**: Repair passes try full blocks before single-week fills (singles only as last resort)
 - **Min/Max Per Resident**: Each resident has per-rotation min/max week constraints
 """)
 
     with log_col:
         st.markdown("#### Update Log")
         st.markdown("""
+**v16h** (Feb 2026)
+- Block-aware repair: tries full blocks (3wk, 2wk, ABABA) before single-week fills
+- Same block rules for interns and seniors (3wk floors, ABABA sandwich, 2wk NF)
+- Intern SLUH target corrected to 8 (inclusive of rotators)
+- Rules summary and update log added to Schedule Grid
+
 **v16g** (Feb 2026)
 - Added IP window cap (max 3 IP per 6-wk window) — hard constraint with relaxed repair fallback
 - Added NF proximity rule (min 6 weeks between NF blocks)
@@ -1833,7 +2027,6 @@ with tab1:
 - Added MICU-Clinic-MICU sandwich avoidance
 - IP Other rotations scheduled at lower priority
 - New sidebar controls for IP window, NF gap parameters
-- Intern SLUH target corrected to 8 (inclusive of rotators)
 
 **v16f** (Feb 2026)
 - By Rotation tab: Gantt-style with fixed row per resident
