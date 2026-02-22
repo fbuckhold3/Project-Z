@@ -886,18 +886,18 @@ def build_senior(params):
             gap = nf_blocks[i + 1][0] - nf_blocks[i][1] - 1
             if gap < NF_MIN_GAP - 1:
                 v += 1
-        # NF block length (>NF_LEN is a violation)
+        # NF block length (>NF_LEN is a violation) — hard constraint
         for blk in nf_blocks:
             blen = blk[1] - blk[0] + 1
             if blen > NF_LEN:
-                v += (blen - NF_LEN) * 2  # Heavy penalty
-        # NF adjacency
+                v += (blen - NF_LEN) * 20
+        # NF adjacency — HARD constraint: very heavy penalty
         for w2 in range(TW):
             if s[w2] == 'NF':
                 if w2 > 0 and s[w2 - 1] in IP_ROTS and s[w2 - 1] != 'NF':
-                    v += 1
+                    v += 20
                 if w2 < TW - 1 and s[w2 + 1] in IP_ROTS and s[w2 + 1] != 'NF':
-                    v += 1
+                    v += 20
         # Jeopardy buffer
         for w2 in range(TW):
             if s[w2] == 'Jeopardy':
@@ -909,13 +909,13 @@ def build_senior(params):
         for w2 in range(TW):
             if s[w2] in ababa_rots:
                 if w2 > 0 and s[w2 - 1] in IP_ROTS and s[w2 - 1] != s[w2] and s[w2 - 1] not in ('OP', 'Clinic', 'Jeopardy'):
-                    v += 1
+                    v += 10
                 if w2 < TW - 1 and s[w2 + 1] in IP_ROTS and s[w2 + 1] != s[w2] and s[w2 + 1] not in ('OP', 'Clinic', 'Jeopardy'):
-                    v += 1
+                    v += 10
         # ABABA consecutive: ABABA-type rotations should not have consecutive weeks
         for w2 in range(1, TW):
             if s[w2] in ababa_rots and s[w2 - 1] == s[w2]:
-                v += 2  # Heavy penalty to strongly discourage consecutive ABABA
+                v += 20  # Hard constraint: never create consecutive ABABA
         return v
 
     def get_violation_weeks(rid):
@@ -1979,14 +1979,14 @@ def build_intern(params):
         for blk in nf_blocks:
             blen = blk[1] - blk[0] + 1
             if blen > NF_LEN:
-                v += (blen - NF_LEN) * 2  # Heavy penalty
-        # NF adjacency
+                v += (blen - NF_LEN) * 20  # Hard constraint
+        # NF adjacency — HARD constraint: very heavy penalty
         for w2 in range(TW):
             if s[w2] == 'NF':
                 if w2 > 0 and s[w2 - 1] in ALL_IP and s[w2 - 1] != 'NF':
-                    v += 1
+                    v += 20
                 if w2 < TW - 1 and s[w2 + 1] in ALL_IP and s[w2 + 1] != 'NF':
-                    v += 1
+                    v += 20
         # Jeopardy buffer
         for w2 in range(TW):
             if s[w2] == 'Jeopardy':
@@ -1998,13 +1998,13 @@ def build_intern(params):
         for w2 in range(TW):
             if s[w2] in ababa_rots_intern:
                 if w2 > 0 and s[w2 - 1] in ALL_IP and s[w2 - 1] != s[w2] and s[w2 - 1] not in ('OP', 'Clinic', 'Jeopardy'):
-                    v += 1
+                    v += 10
                 if w2 < TW - 1 and s[w2 + 1] in ALL_IP and s[w2 + 1] != s[w2] and s[w2 + 1] not in ('OP', 'Clinic', 'Jeopardy'):
-                    v += 1
+                    v += 10
         # ABABA consecutive: ABABA-type rotations should not have consecutive weeks
         for w2 in range(1, TW):
             if s[w2] in ababa_rots_intern and s[w2 - 1] == s[w2]:
-                v += 2  # Heavy penalty
+                v += 20  # Hard constraint: never create consecutive ABABA
         return v
 
     def get_violation_weeks(rid):
