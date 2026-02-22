@@ -336,7 +336,7 @@ def build_senior(params):
         BT[rot] = block_types.get(rot, '1-week')
 
     # Identify rotations by block type
-    mario_kart_rots = [r for r in TARGETS if BT.get(r) == 'MarioKart (3wk)']
+    mario_kart_rots = [r for r in TARGETS if BT.get(r) in ('MarioKart (3wk)', 'MarioKart (3-4wk)')]
     two_week_rots = [r for r in TARGETS if BT.get(r) == '2-week']
     ababa_rots = [r for r in TARGETS if BT.get(r) == 'ABABA (3×1wk)']
     single_rots = [r for r in TARGETS if BT.get(r) == '1-week']
@@ -350,24 +350,40 @@ def build_senior(params):
             return False
         return True
 
-    # Pass 1: MarioKart (3wk) rotations with stagger constraint
+    # Pass 1: MarioKart (3wk) and MarioKart (3-4wk) rotations with stagger constraint
     for ward_rot in mario_kart_rots:
         target = TARGETS[ward_rot]
         for w in range(TW - WARD_LEN + 1):
             while coverage[ward_rot][w] < target:
-                cands = [r for r in residents
-                         if all(is_free(r['id'], w + i) for i in range(WARD_LEN))
-                         and ip_window_ok(r['id'], list(range(w, w + WARD_LEN)))
-                         and check_max(r['id'], ward_rot, WARD_LEN)
-                         and start_count[ward_rot][w] < MAX_STAGGER]
-                if not cands:
+                # Determine block length for this rotation
+                if BT.get(ward_rot) == 'MarioKart (3-4wk)':
+                    block_lengths = [4, WARD_LEN]  # try 4 weeks first, then 3
+                else:
+                    block_lengths = [WARD_LEN]
+
+                placed = False
+                for blen in block_lengths:
+                    # Check if we have enough weeks remaining for this block length
+                    if w + blen > TW:
+                        continue
+                    cands = [r for r in residents
+                             if all(is_free(r['id'], w + i) for i in range(blen))
+                             and ip_window_ok(r['id'], list(range(w, w + blen)))
+                             and check_max(r['id'], ward_rot, blen)
+                             and start_count[ward_rot][w] < MAX_STAGGER]
+                    if not cands:
+                        continue
+                    cands.sort(key=lambda r: (balance_score(r['id'], ward_rot, blen), random.random()))
+                    rid = cands[0]['id']
+                    for i in range(blen):
+                        assign(rid, w + i, ward_rot)
+                    res_weeks[rid][ward_rot] += blen
+                    start_count[ward_rot][w] += 1
+                    placed = True
                     break
-                cands.sort(key=lambda r: (balance_score(r['id'], ward_rot, WARD_LEN), random.random()))
-                rid = cands[0]['id']
-                for i in range(WARD_LEN):
-                    assign(rid, w + i, ward_rot)
-                res_weeks[rid][ward_rot] += WARD_LEN
-                start_count[ward_rot][w] += 1
+
+                if not placed:
+                    break
 
     # Pass 2: 2-week rotations with stagger constraint
     for two_week_rot in two_week_rots:
@@ -512,38 +528,45 @@ def build_senior(params):
     if FILL_MODE == 'Greedy':
           # Pass 5b: Block-aware repair — try full blocks before single weeks
 
-        # 5b-i: MarioKart repair (SLUH, VA — 3-week contiguous blocks)
+        # 5b-i: MarioKart repair (SLUH, VA — 3-week or 3-4-week contiguous blocks)
         flexible_rots = {'SLUH', 'VA', 'Diamond', 'Gold'}
-        for rot in [r for r in all_repair_rots if BT.get(r) == 'MarioKart (3wk)']:
+        for rot in [r for r in all_repair_rots if BT.get(r) in ('MarioKart (3wk)', 'MarioKart (3-4wk)')]:
             target = TARGETS[rot]
-            for w in range(TW - WARD_LEN + 1):
-                wks = list(range(w, w + WARD_LEN))
-                if not all(coverage[rot][ww] < target for ww in wks):
-                    continue
-                placed = True
-                while placed:
-                    placed = False
+            # Determine block lengths to try
+            if BT.get(rot) == 'MarioKart (3-4wk)':
+                block_lengths_repair = [4, WARD_LEN]  # try 4 weeks first, then 3
+            else:
+                block_lengths_repair = [WARD_LEN]
+
+            for blen in block_lengths_repair:
+                for w in range(TW - blen + 1):
+                    wks = list(range(w, w + blen))
                     if not all(coverage[rot][ww] < target for ww in wks):
-                        break
-                    cands = [r for r in residents
-                             if all(schedule[r['id']][ww] == 'OP' for ww in wks)
-                             and ip_window_ok(r['id'], wks)
-                             and sandwich_buffer_ok(r['id'], wks[0], rot)
-                             and sandwich_buffer_ok(r['id'], wks[-1], rot)
-                             and check_max(r['id'], rot, WARD_LEN)]
-                    if not cands:
-                        break
-                    cands.sort(key=lambda r: (
-                        0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
-                        balance_score(r['id'], rot, WARD_LEN), random.random()
-                    ))
-                    rid = cands[0]['id']
-                    for ww in wks:
-                        schedule[rid][ww] = rot
-                        coverage['OP'][ww] -= 1
-                        coverage[rot][ww] += 1
-                        res_weeks[rid][rot] += 1
+                        continue
                     placed = True
+                    while placed:
+                        placed = False
+                        if not all(coverage[rot][ww] < target for ww in wks):
+                            break
+                        cands = [r for r in residents
+                                 if all(schedule[r['id']][ww] == 'OP' for ww in wks)
+                                 and ip_window_ok(r['id'], wks)
+                                 and sandwich_buffer_ok(r['id'], wks[0], rot)
+                                 and sandwich_buffer_ok(r['id'], wks[-1], rot)
+                                 and check_max(r['id'], rot, blen)]
+                        if not cands:
+                            break
+                        cands.sort(key=lambda r: (
+                            0 if res_weeks[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                            balance_score(r['id'], rot, blen), random.random()
+                        ))
+                        rid = cands[0]['id']
+                        for ww in wks:
+                            schedule[rid][ww] = rot
+                            coverage['OP'][ww] -= 1
+                            coverage[rot][ww] += 1
+                            res_weeks[rid][rot] += 1
+                        placed = True
 
         # 5b-i-flex: Flexible shorter blocks for SLUH/VA/Diamond/Gold if 3-week coverage still not met
         if rot in flexible_rots:
@@ -1189,7 +1212,7 @@ def build_intern(params):
     for rot in ['IP Other 1', 'IP Other 2']:
         BT[rot] = block_types.get(rot, '1-week')
 
-    mario_kart_rots_intern = [r for r in ['SLUH', 'VA'] if BT.get(r) == 'MarioKart (3wk)']
+    mario_kart_rots_intern = [r for r in ['SLUH', 'VA'] if BT.get(r) in ('MarioKart (3wk)', 'MarioKart (3-4wk)')]
     two_week_rots_intern = [r for r in ['NF'] if BT.get(r) == '2-week']
     ababa_rots_intern = [r for r in STAG if BT.get(r) == 'ABABA (3×1wk)']
     single_rots_intern = [r for r in STAG if BT.get(r) == '1-week']
@@ -1439,36 +1462,66 @@ def build_intern(params):
     for r in residents:
         clinic_weeks_i[r['id']] = [w for w in range(TW) if schedule[r['id']][w] == 'Clinic']
 
-    # Pass 1: MarioKart (3wk) with stagger
+    # Pass 1: MarioKart (3wk) and MarioKart (3-4wk) with stagger
     if 'SLUH' in mario_kart_rots_intern:
         for w in range(TW - WARD_LEN + 1):
             while coverage['SLUH'][w] < it_s[w]:
-                cs = [r for r in residents
-                      if all(free(r['id'], w + i) for i in range(WARD_LEN))
-                      and ip_window_ok(r['id'], list(range(w, w + WARD_LEN)))
-                      and check_max_i(r['id'], 'SLUH', WARD_LEN)
-                      and start_count['SLUH'][w] < MAX_STAGGER]
-                if not cs:
+                # Determine block length for SLUH
+                if BT.get('SLUH') == 'MarioKart (3-4wk)':
+                    block_lengths_sluh = [4, WARD_LEN]  # try 4 weeks first, then 3
+                else:
+                    block_lengths_sluh = [WARD_LEN]
+
+                placed = False
+                for blen in block_lengths_sluh:
+                    if w + blen > TW:
+                        continue
+                    cs = [r for r in residents
+                          if all(free(r['id'], w + i) for i in range(blen))
+                          and ip_window_ok(r['id'], list(range(w, w + blen)))
+                          and check_max_i(r['id'], 'SLUH', blen)
+                          and start_count['SLUH'][w] < MAX_STAGGER]
+                    if not cs:
+                        continue
+                    cs.sort(key=lambda r: (bs(r['id'], 'SLUH', blen), random.random()))
+                    for i in range(blen):
+                        asgn(cs[0]['id'], w + i, 'SLUH')
+                    start_count['SLUH'][w] += 1
+                    placed = True
                     break
-                cs.sort(key=lambda r: (bs(r['id'], 'SLUH', WARD_LEN), random.random()))
-                for i in range(WARD_LEN):
-                    asgn(cs[0]['id'], w + i, 'SLUH')
-                start_count['SLUH'][w] += 1
+
+                if not placed:
+                    break
 
     if 'VA' in mario_kart_rots_intern:
         for w in range(TW - WARD_LEN + 1):
             while coverage['VA'][w] < it_v[w]:
-                cs = [r for r in residents
-                      if all(free(r['id'], w + i) for i in range(WARD_LEN))
-                      and ip_window_ok(r['id'], list(range(w, w + WARD_LEN)))
-                      and check_max_i(r['id'], 'VA', WARD_LEN)
-                      and start_count['VA'][w] < MAX_STAGGER]
-                if not cs:
+                # Determine block length for VA
+                if BT.get('VA') == 'MarioKart (3-4wk)':
+                    block_lengths_va = [4, WARD_LEN]  # try 4 weeks first, then 3
+                else:
+                    block_lengths_va = [WARD_LEN]
+
+                placed = False
+                for blen in block_lengths_va:
+                    if w + blen > TW:
+                        continue
+                    cs = [r for r in residents
+                          if all(free(r['id'], w + i) for i in range(blen))
+                          and ip_window_ok(r['id'], list(range(w, w + blen)))
+                          and check_max_i(r['id'], 'VA', blen)
+                          and start_count['VA'][w] < MAX_STAGGER]
+                    if not cs:
+                        continue
+                    cs.sort(key=lambda r: (bs(r['id'], 'VA', blen), random.random()))
+                    for i in range(blen):
+                        asgn(cs[0]['id'], w + i, 'VA')
+                    start_count['VA'][w] += 1
+                    placed = True
                     break
-                cs.sort(key=lambda r: (bs(r['id'], 'VA', WARD_LEN), random.random()))
-                for i in range(WARD_LEN):
-                    asgn(cs[0]['id'], w + i, 'VA')
-                start_count['VA'][w] += 1
+
+                if not placed:
+                    break
 
     # Pass 2: 2-week (NF) with stagger + NF gap/adjacency checks
     for w in range(TW - NF_LEN + 1):
@@ -1604,37 +1657,44 @@ def build_intern(params):
             else:
                 intern_targets_by_week[rot] = [FULL[rot]] * TW
 
-        # 4b-i: MarioKart repair (SLUH, VA — 3-week contiguous blocks)
+        # 4b-i: MarioKart repair (SLUH, VA — 3-week or 3-4-week contiguous blocks)
         flexible_rots = {'SLUH', 'VA'}
-        for rot in [r for r in intern_repair_rots if BT.get(r) == 'MarioKart (3wk)']:
-            for w in range(TW - WARD_LEN + 1):
-                wks = list(range(w, w + WARD_LEN))
-                tgts = [intern_targets_by_week[rot][ww] for ww in wks]
-                if not all(coverage[rot][ww] < tgts[i] for i, ww in enumerate(wks)):
-                    continue
-                p = True
-                while p:
-                    p = False
-                    if not all(coverage[rot][ww] < intern_targets_by_week[rot][ww] for ww in wks):
-                        break
-                    cs = [r for r in residents
-                          if all(schedule[r['id']][ww] == 'OP' for ww in wks)
-                          and ip_window_ok(r['id'], wks)
-                          and sandwich_buffer_ok(r['id'], wks[0], rot)
-                          and sandwich_buffer_ok(r['id'], wks[-1], rot)
-                          and check_max_i(r['id'], rot, WARD_LEN)]
-                    if not cs:
-                        break
-                    cs.sort(key=lambda r: (
-                        0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
-                        bs(r['id'], rot, WARD_LEN), random.random()
-                    ))
-                    rid = cs[0]['id']
-                    for ww in wks:
-                        schedule[rid][ww] = rot
-                        rw[rid][rot] += 1
-                        coverage[rot][ww] += 1
+        for rot in [r for r in intern_repair_rots if BT.get(r) in ('MarioKart (3wk)', 'MarioKart (3-4wk)')]:
+            # Determine block lengths to try
+            if BT.get(rot) == 'MarioKart (3-4wk)':
+                block_lengths_repair_i = [4, WARD_LEN]  # try 4 weeks first, then 3
+            else:
+                block_lengths_repair_i = [WARD_LEN]
+
+            for blen in block_lengths_repair_i:
+                for w in range(TW - blen + 1):
+                    wks = list(range(w, w + blen))
+                    tgts = [intern_targets_by_week[rot][ww] for ww in wks]
+                    if not all(coverage[rot][ww] < tgts[i] for i, ww in enumerate(wks)):
+                        continue
                     p = True
+                    while p:
+                        p = False
+                        if not all(coverage[rot][ww] < intern_targets_by_week[rot][ww] for ww in wks):
+                            break
+                        cs = [r for r in residents
+                              if all(schedule[r['id']][ww] == 'OP' for ww in wks)
+                              and ip_window_ok(r['id'], wks)
+                              and sandwich_buffer_ok(r['id'], wks[0], rot)
+                              and sandwich_buffer_ok(r['id'], wks[-1], rot)
+                              and check_max_i(r['id'], rot, blen)]
+                        if not cs:
+                            break
+                        cs.sort(key=lambda r: (
+                            0 if rw[r['id']][rot] < MIN_PER_RES.get(rot, 0) else 1,
+                            bs(r['id'], rot, blen), random.random()
+                        ))
+                        rid = cs[0]['id']
+                        for ww in wks:
+                            schedule[rid][ww] = rot
+                            rw[rid][rot] += 1
+                            coverage[rot][ww] += 1
+                        p = True
 
         # 4b-ii: 2-week repair (NF)
         for rot in [r for r in intern_repair_rots if BT.get(r) == '2-week']:
@@ -2546,7 +2606,7 @@ st.sidebar.markdown("### Block Types")
 st.sidebar.caption("Choose how each rotation is structured: contiguous blocks, alternating ABABA, or single weeks.")
 
 block_types = {}
-block_options = ["ABABA (3×1wk)", "MarioKart (3wk)", "2-week", "1-week"]
+block_options = ["ABABA (3×1wk)", "MarioKart (3wk)", "MarioKart (3-4wk)", "2-week", "1-week"]
 
 if level == "Senior":
     defaults = {
@@ -2754,8 +2814,8 @@ if 'manual_edits' in st.session_state:
 # ═══════════════════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Schedule Grid", "By Rotation", "Coverage & Staffing", "Balance & Fairness", "Compare", "Edit Schedule"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "Schedule Grid", "By Rotation", "Coverage & Staffing", "Balance & Fairness", "Compare", "Edit Schedule", "Capacity Calculator"
 ])
 
 # ── TAB 1: Schedule Grid ──
@@ -3275,3 +3335,152 @@ with tab6:
         if st.button("Clear All Edits"):
             st.session_state['manual_edits'] = []
             st.rerun()
+
+# ── TAB 7: Capacity Calculator ──
+with tab7:
+    st.markdown("### Capacity Calculator")
+    st.caption("Does your roster have enough capacity to meet coverage targets, given the IP window constraint?")
+
+    # Pull current params
+    _tw = 96 if level == "Senior" else 48
+    _cycle = params.get('clinic_freq', 6)
+    _ip_win = params.get('ip_window', 6)
+    _max_ip = params.get('max_ip_win', 3)
+
+    if level == "Senior":
+        _n = params['n_pgy3'] + params['n_pgy2']
+        _targets = {
+            'SLUH': params['t_sluh'], 'VA': params['t_va'], 'ID': params.get('t_id', 0),
+            'NF': params['t_nf'], 'MICU': params['t_micu'], 'Bronze': params.get('t_bronze', 0),
+            'Cards': params['t_cards'], 'Gold': params.get('t_gold', 0),
+            'Diamond': params.get('t_diamond', 0),
+            'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
+        }
+        _targets = {k: v for k, v in _targets.items() if v > 0}
+        _rotator_help = {}  # seniors have no rotators
+    else:
+        _n = params['n_cat'] + params['n_prelim']
+        _targets = {
+            'SLUH': params['t_sluh'], 'VA': params['t_va'],
+            'NF': params['t_nf'], 'MICU': params['t_micu'], 'Cards': params['t_cards'],
+            'IP Other 1': params.get('t_other1', 0), 'IP Other 2': params.get('t_other2', 0),
+        }
+        _targets = {k: v for k, v in _targets.items() if v > 0}
+        # Estimate rotator contributions
+        _n_neuro = params.get('n_neuro', 0)
+        _neuro_mo = params.get('neuro_months', 4)
+        _n_anes = params.get('n_anes', 0)
+        _n_psych = params.get('n_psych', 0)
+        _n_em = params.get('n_em', 0)
+        _neuro_pw = _n_neuro * _neuro_mo * 4
+        _rotator_help = {
+            'SLUH': _neuro_pw // 2 + _n_anes * 4 + _n_psych * 4,
+            'VA': _neuro_pw // 2 + _n_em * 4,
+        }
+
+    # Calculations
+    _clinic_per_res = _tw // _cycle
+    _avail_per_res = _tw - _clinic_per_res
+    _ip_ratio = _max_ip / (_ip_win - 1) if _ip_win > 1 else 1.0
+    _max_ip_per_res = int(_avail_per_res * _ip_ratio)
+
+    _total_demand_raw = sum(t * _tw for t in _targets.values())
+    _rotator_total = sum(_rotator_help.values())
+    _core_demand = _total_demand_raw - _rotator_total
+    _jeo_demand = _tw
+    _total_demand = _core_demand + _jeo_demand
+
+    _max_supply = _n * _max_ip_per_res
+    _margin = _max_supply - _total_demand
+    _margin_pct = _margin / _total_demand * 100 if _total_demand > 0 else 0
+    _eff_supply = int(_max_supply * 0.85)
+    _eff_margin = _eff_supply - _total_demand
+
+    _util_needed = _total_demand / (_n * _avail_per_res) * 100 if _n > 0 else 999
+    _util_max = _ip_ratio * 100
+
+    # Display
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Residents", _n)
+    c2.metric("Weeks", _tw)
+    c3.metric("IP Window Rule", f"{_max_ip} in {_ip_win}")
+
+    st.markdown("---")
+
+    # Demand table
+    st.markdown("#### Demand (person-weeks needed)")
+    demand_rows = []
+    for rot, t in sorted(_targets.items(), key=lambda x: -x[1]):
+        raw = t * _tw
+        rh = _rotator_help.get(rot, 0)
+        net = raw - rh
+        demand_rows.append({'Rotation': rot, 'Target/wk': t, 'Raw': raw,
+                            'Rotator Help': rh, 'Core Demand': net})
+    demand_rows.append({'Rotation': 'Jeopardy', 'Target/wk': 1, 'Raw': _tw,
+                        'Rotator Help': 0, 'Core Demand': _tw})
+    demand_rows.append({'Rotation': 'TOTAL', 'Target/wk': '', 'Raw': _total_demand_raw + _tw,
+                        'Rotator Help': _rotator_total, 'Core Demand': _total_demand})
+    import pandas as _pd
+    st.dataframe(_pd.DataFrame(demand_rows), use_container_width=True, hide_index=True)
+
+    # Supply vs Demand
+    st.markdown("#### Supply vs Demand")
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        st.markdown(f"""
+- **Available weeks/resident**: {_avail_per_res} (of {_tw}, minus {_clinic_per_res} clinic)
+- **IP window cap/resident**: {_max_ip_per_res} weeks ({_ip_ratio*100:.0f}% of {_avail_per_res})
+- **Max IP supply**: {_n} × {_max_ip_per_res} = **{_max_supply}**
+""")
+    with sc2:
+        st.markdown(f"""
+- **Core IP demand**: **{_total_demand}** person-weeks
+- **Utilization needed**: {_util_needed:.1f}%
+- **Max utilization allowed**: {_util_max:.0f}%
+""")
+
+    # Verdict
+    st.markdown("#### Verdict")
+    if _margin >= 0 and _eff_margin >= 0:
+        st.success(f"✅ **Feasible** — {_margin:+d} person-weeks of headroom ({_margin_pct:+.1f}%), "
+                   f"even with scheduling friction ({_eff_margin:+d})")
+    elif _margin >= 0:
+        st.warning(f"⚠️ **Tight** — Theoretically feasible ({_margin:+d}, {_margin_pct:+.1f}%) "
+                   f"but scheduling friction may cause violations (effective margin: {_eff_margin:+d})")
+    else:
+        _needed = int(_total_demand / _max_ip_per_res) + 1
+        st.error(f"❌ **Infeasible** — {abs(_margin)} person-weeks short ({_margin_pct:+.1f}%). "
+                 f"Need ~{_needed} residents (have {_n}).")
+
+    # What-if: residents needed
+    st.markdown("#### What-If Scenarios")
+    st.caption("How many residents would you need at different IP window settings?")
+    whatif_rows = []
+    for mi, wi in [(3, 6), (4, 6), (3, 5), (4, 7), (5, 8)]:
+        r = mi / (wi - 1) if wi > 1 else 1
+        mpr = int(_avail_per_res * r)
+        needed_th = (_total_demand // mpr) + (1 if _total_demand % mpr else 0)
+        needed_eff = int(_total_demand / (mpr * 0.85)) + 1
+        supply = _n * mpr
+        m = supply - _total_demand
+        whatif_rows.append({
+            'IP Window': f"max {mi} in {wi} wks",
+            'Max IP/res': mpr,
+            'Supply': supply,
+            'Margin': f"{m:+d}",
+            'Status': '✅' if m > 0 else ('⚠️' if m >= -50 else '❌'),
+            'Residents Needed (theory)': needed_th,
+            'Residents Needed (practical)': needed_eff,
+        })
+    st.dataframe(_pd.DataFrame(whatif_rows), use_container_width=True, hide_index=True)
+
+    # Per-rotation ideal
+    st.markdown("#### Ideal Distribution Per Resident")
+    ideal_rows = []
+    for rot, t in sorted(_targets.items(), key=lambda x: -x[1]):
+        rh = _rotator_help.get(rot, 0)
+        net = t * _tw - rh
+        ideal = net / _n if _n > 0 else 0
+        ideal_rows.append({'Rotation': rot, 'Ideal wks/resident': round(ideal, 1)})
+    ideal_rows.append({'Rotation': 'Jeopardy', 'Ideal wks/resident': round(_tw / _n, 1) if _n > 0 else 0})
+    st.dataframe(_pd.DataFrame(ideal_rows), use_container_width=True, hide_index=True)
