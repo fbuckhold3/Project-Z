@@ -286,6 +286,18 @@ def build_senior(params):
                 return False
         return True
 
+    def ababa_no_consec(rid, w, rot):
+        """For ABABA-type rotations, prevent placing at week w if same rotation at w-1 or w+1.
+           This preserves the alternating pattern (e.g., MICU-OP-MICU-OP-MICU)."""
+        if BT.get(rot) != 'ABABA (3×1wk)':
+            return True  # Only applies to ABABA rotations
+        s = schedule[rid]
+        if w > 0 and s[w - 1] == rot:
+            return False
+        if w < TW - 1 and s[w + 1] == rot:
+            return False
+        return True
+
     def jeo_buffer_ok(rid, w):
         """Check that jeopardy at week w is not directly adjacent to IP."""
         s = schedule[rid]
@@ -370,7 +382,9 @@ def build_senior(params):
                              if all(is_free(r['id'], w + i) for i in range(blen))
                              and ip_window_ok(r['id'], list(range(w, w + blen)))
                              and check_max(r['id'], ward_rot, blen)
-                             and start_count[ward_rot][w] < MAX_STAGGER]
+                             and start_count[ward_rot][w] < MAX_STAGGER
+                             and all(nf_adjacency_ok(r['id'], w + i, ward_rot) for i in range(blen))
+                             and all(sandwich_buffer_ok(r['id'], w + i, ward_rot) for i in range(blen))]
                     if not cands:
                         continue
                     cands.sort(key=lambda r: (balance_score(r['id'], ward_rot, blen), random.random()))
@@ -440,6 +454,10 @@ def build_senior(params):
                     continue
                 if not micu_cl_sandwich(r['id'], weeks3, rot):
                     continue
+                if not all(nf_adjacency_ok(r['id'], ww, rot) for ww in weeks3):
+                    continue
+                if not all(sandwich_buffer_ok(r['id'], ww, rot) for ww in weeks3):
+                    continue
                 # Place it
                 for ww in weeks3:
                     assign(r['id'], ww, rot)
@@ -460,6 +478,10 @@ def build_senior(params):
                     if not ip_window_ok(r['id'], weeks3):
                         continue
                     if not micu_cl_sandwich(r['id'], weeks3, rot):
+                        continue
+                    if not all(nf_adjacency_ok(r['id'], ww, rot) for ww in weeks3):
+                        continue
+                    if not all(sandwich_buffer_ok(r['id'], ww, rot) for ww in weeks3):
                         continue
                     for ww in weeks3:
                         assign(r['id'], ww, rot)
@@ -483,7 +505,9 @@ def build_senior(params):
                          and all(has_op_sandwich(r['id'], ww) for ww in weeks3)
                          and ip_window_ok(r['id'], weeks3)
                          and micu_cl_sandwich(r['id'], weeks3, rot)
-                         and check_max(r['id'], rot, 3)]
+                         and check_max(r['id'], rot, 3)
+                         and all(nf_adjacency_ok(r['id'], ww, rot) for ww in weeks3)
+                         and all(sandwich_buffer_ok(r['id'], ww, rot) for ww in weeks3)]
                 if not cands:
                     break
                 cands.sort(key=lambda r: (balance_score(r['id'], rot, 3), random.random()))
@@ -505,6 +529,8 @@ def build_senior(params):
                          if is_free(r['id'], w)
                          and has_op_sandwich(r['id'], w)
                          and ip_window_ok(r['id'], [w])
+                         and nf_adjacency_ok(r['id'], w, rot)
+                         and sandwich_buffer_ok(r['id'], w, rot)
                          and check_max(r['id'], rot, 1)]
                 if not cands:
                     break
@@ -551,8 +577,8 @@ def build_senior(params):
                         cands = [r for r in residents
                                  if all(schedule[r['id']][ww] == 'OP' for ww in wks)
                                  and ip_window_ok(r['id'], wks)
-                                 and sandwich_buffer_ok(r['id'], wks[0], rot)
-                                 and sandwich_buffer_ok(r['id'], wks[-1], rot)
+                                 and all(sandwich_buffer_ok(r['id'], ww, rot) for ww in wks)
+                                 and all(nf_adjacency_ok(r['id'], ww, rot) for ww in wks)
                                  and check_max(r['id'], rot, blen)]
                         if not cands:
                             break
@@ -585,8 +611,8 @@ def build_senior(params):
                         cands = [r for r in residents
                                  if all(schedule[r['id']][ww] == 'OP' for ww in wks)
                                  and ip_window_ok(r['id'], wks)
-                                 and sandwich_buffer_ok(r['id'], wks[0], rot)
-                                 and sandwich_buffer_ok(r['id'], wks[-1], rot)
+                                 and all(sandwich_buffer_ok(r['id'], ww, rot) for ww in wks)
+                                 and all(nf_adjacency_ok(r['id'], ww, rot) for ww in wks)
                                  and check_max(r['id'], rot, 2)]
                         if not cands:
                             break
@@ -616,6 +642,7 @@ def build_senior(params):
                                  if schedule[r['id']][w] == 'OP'
                                  and ip_window_ok(r['id'], [w])
                                  and sandwich_buffer_ok(r['id'], w, rot)
+                                 and nf_adjacency_ok(r['id'], w, rot)
                                  and check_max(r['id'], rot, 1)]
                         if not cands:
                             break
@@ -681,6 +708,7 @@ def build_senior(params):
                              and ip_window_ok(r['id'], weeks3)
                              and micu_cl_sandwich(r['id'], weeks3, rot)
                              and all(sandwich_buffer_ok(r['id'], ww, rot) for ww in weeks3)
+                             and all(nf_adjacency_ok(r['id'], ww, rot) for ww in weeks3)
                              and check_max(r['id'], rot, 3)]
                     if not cands:
                         break
@@ -708,6 +736,7 @@ def build_senior(params):
                              and ip_window_ok(r['id'], [w])
                              and nf_adjacency_ok(r['id'], w, rot)
                              and sandwich_buffer_ok(r['id'], w, rot)
+                             and ababa_no_consec(r['id'], w, rot)
                              and (rot != 'NF' or nf_gap_ok(r['id'], [w]))
                              and (rot != 'NF' or nf_block_len_ok(r['id'], w))
                              and check_max(r['id'], rot, 1)]
@@ -744,6 +773,7 @@ def build_senior(params):
                         if (schedule[did][w] == 'OP' and ip_window_ok(did, [w])
                                 and nf_adjacency_ok(did, w, rot)
                                 and sandwich_buffer_ok(did, w, rot)
+                                and ababa_no_consec(did, w, rot)
                                 and (rot != 'NF' or nf_gap_ok(did, [w]))
                                 and (rot != 'NF' or nf_block_len_ok(did, w))):
                             schedule[did][w2] = 'OP'
@@ -764,7 +794,10 @@ def build_senior(params):
                     cands = [r for r in residents
                              if schedule[r['id']][w] == 'OP'
                              and ip_window_ok(r['id'], [w], relaxed=True)
+                             and nf_adjacency_ok(r['id'], w, rot)
                              and sandwich_buffer_ok(r['id'], w, rot)
+                             and ababa_no_consec(r['id'], w, rot)
+                             and (rot != 'NF' or nf_gap_ok(r['id'], [w]))
                              and (rot != 'NF' or nf_block_len_ok(r['id'], w))
                              and check_max(r['id'], rot, 1)]
                     if not cands:
@@ -797,7 +830,10 @@ def build_senior(params):
                         if fixed:
                             break
                         did = donor['id']
-                        if schedule[did][w] == 'OP' and ip_window_ok(did, [w], relaxed=True) and sandwich_buffer_ok(did, w, rot) and (rot != 'NF' or nf_block_len_ok(did, w)):
+                        if (schedule[did][w] == 'OP' and ip_window_ok(did, [w], relaxed=True)
+                                and nf_adjacency_ok(did, w, rot) and sandwich_buffer_ok(did, w, rot)
+                                and ababa_no_consec(did, w, rot) and nf_gap_ok(did, [w])
+                                and (rot != 'NF' or nf_block_len_ok(did, w))):
                             schedule[did][w2] = 'OP'
                             schedule[did][w] = rot
                             coverage[rot][w2] -= 1
@@ -876,6 +912,10 @@ def build_senior(params):
                     v += 1
                 if w2 < TW - 1 and s[w2 + 1] in IP_ROTS and s[w2 + 1] != s[w2] and s[w2 + 1] not in ('OP', 'Clinic', 'Jeopardy'):
                     v += 1
+        # ABABA consecutive: ABABA-type rotations should not have consecutive weeks
+        for w2 in range(1, TW):
+            if s[w2] in ababa_rots and s[w2 - 1] == s[w2]:
+                v += 2  # Heavy penalty to strongly discourage consecutive ABABA
         return v
 
     def get_violation_weeks(rid):
@@ -945,6 +985,12 @@ def build_senior(params):
                 if w2 < TW - 1 and s[w2 + 1] in IP_ROTS and s[w2 + 1] != s[w2] and s[w2 + 1] not in ('OP', 'Clinic', 'Jeopardy'):
                     violation_weeks.add(w2)
                     violation_weeks.add(w2 + 1)
+
+        # ABABA consecutive violations: consecutive weeks of same ABABA rotation
+        for w2 in range(1, TW):
+            if s[w2] in ababa_rots and s[w2 - 1] == s[w2]:
+                violation_weeks.add(w2)
+                violation_weeks.add(w2 - 1)
 
         return violation_weeks
 
@@ -1416,6 +1462,17 @@ def build_intern(params):
                 return False
         return True
 
+    def ababa_no_consec(rid, w, rot):
+        """For ABABA-type rotations, prevent placing at week w if same rotation at w-1 or w+1."""
+        if BT.get(rot) != 'ABABA (3×1wk)':
+            return True
+        s = schedule[rid]
+        if w > 0 and s[w - 1] == rot:
+            return False
+        if w < TW - 1 and s[w + 1] == rot:
+            return False
+        return True
+
     def jeo_buffer_ok(rid, w):
         s = schedule[rid]
         if w > 0 and s[w - 1] in ALL_IP:
@@ -1480,7 +1537,9 @@ def build_intern(params):
                           if all(free(r['id'], w + i) for i in range(blen))
                           and ip_window_ok(r['id'], list(range(w, w + blen)))
                           and check_max_i(r['id'], 'SLUH', blen)
-                          and start_count['SLUH'][w] < MAX_STAGGER]
+                          and start_count['SLUH'][w] < MAX_STAGGER
+                          and all(nf_adjacency_ok(r['id'], w + i, 'SLUH') for i in range(blen))
+                          and all(sandwich_buffer_ok(r['id'], w + i, 'SLUH') for i in range(blen))]
                     if not cs:
                         continue
                     cs.sort(key=lambda r: (bs(r['id'], 'SLUH', blen), random.random()))
@@ -1510,7 +1569,9 @@ def build_intern(params):
                           if all(free(r['id'], w + i) for i in range(blen))
                           and ip_window_ok(r['id'], list(range(w, w + blen)))
                           and check_max_i(r['id'], 'VA', blen)
-                          and start_count['VA'][w] < MAX_STAGGER]
+                          and start_count['VA'][w] < MAX_STAGGER
+                          and all(nf_adjacency_ok(r['id'], w + i, 'VA') for i in range(blen))
+                          and all(sandwich_buffer_ok(r['id'], w + i, 'VA') for i in range(blen))]
                     if not cs:
                         continue
                     cs.sort(key=lambda r: (bs(r['id'], 'VA', blen), random.random()))
@@ -1569,6 +1630,10 @@ def build_intern(params):
                     continue
                 if not micu_cl_sandwich(r['id'], weeks3, sr):
                     continue
+                if not all(nf_adjacency_ok(r['id'], ww, sr) for ww in weeks3):
+                    continue
+                if not all(sandwich_buffer_ok(r['id'], ww, sr) for ww in weeks3):
+                    continue
                 for ww in weeks3:
                     asgn(r['id'], ww, sr)
                 i_block_used[r['id']].add(sr)
@@ -1586,6 +1651,10 @@ def build_intern(params):
                     if not ip_window_ok(r['id'], weeks3):
                         continue
                     if not micu_cl_sandwich(r['id'], weeks3, sr):
+                        continue
+                    if not all(nf_adjacency_ok(r['id'], ww, sr) for ww in weeks3):
+                        continue
+                    if not all(sandwich_buffer_ok(r['id'], ww, sr) for ww in weeks3):
                         continue
                     for ww in weeks3:
                         asgn(r['id'], ww, sr)
@@ -1608,7 +1677,9 @@ def build_intern(params):
                       and all(has_op_sandwich(r['id'], ww) for ww in weeks3)
                       and ip_window_ok(r['id'], weeks3)
                       and micu_cl_sandwich(r['id'], weeks3, sr)
-                      and check_max_i(r['id'], sr, 3)]
+                      and check_max_i(r['id'], sr, 3)
+                      and all(nf_adjacency_ok(r['id'], ww, sr) for ww in weeks3)
+                      and all(sandwich_buffer_ok(r['id'], ww, sr) for ww in weeks3)]
                 if not cs:
                     break
                 cs.sort(key=lambda r: (bs(r['id'], sr, 3), random.random()))
@@ -1628,6 +1699,8 @@ def build_intern(params):
                       if free(r['id'], w)
                       and has_op_sandwich(r['id'], w)
                       and ip_window_ok(r['id'], [w])
+                      and nf_adjacency_ok(r['id'], w, sr)
+                      and sandwich_buffer_ok(r['id'], w, sr)
                       and check_max_i(r['id'], sr, 1)]
                 if not cs:
                     break
@@ -1680,8 +1753,8 @@ def build_intern(params):
                         cs = [r for r in residents
                               if all(schedule[r['id']][ww] == 'OP' for ww in wks)
                               and ip_window_ok(r['id'], wks)
-                              and sandwich_buffer_ok(r['id'], wks[0], rot)
-                              and sandwich_buffer_ok(r['id'], wks[-1], rot)
+                              and all(sandwich_buffer_ok(r['id'], ww, rot) for ww in wks)
+                              and all(nf_adjacency_ok(r['id'], ww, rot) for ww in wks)
                               and check_max_i(r['id'], rot, blen)]
                         if not cs:
                             break
@@ -1746,6 +1819,7 @@ def build_intern(params):
                           and ip_window_ok(r['id'], weeks3)
                           and micu_cl_sandwich(r['id'], weeks3, rot)
                           and all(sandwich_buffer_ok(r['id'], ww, rot) for ww in weeks3)
+                          and all(nf_adjacency_ok(r['id'], ww, rot) for ww in weeks3)
                           and check_max_i(r['id'], rot, 3)]
                     if not cs:
                         break
@@ -1770,6 +1844,7 @@ def build_intern(params):
                           and ip_window_ok(r['id'], [w])
                           and nf_adjacency_ok(r['id'], w, rot)
                           and sandwich_buffer_ok(r['id'], w, rot)
+                          and ababa_no_consec(r['id'], w, rot)
                           and (rot != 'NF' or nf_gap_ok(r['id'], [w]))
                           and (rot != 'NF' or nf_block_len_ok(r['id'], w))
                           and check_max_i(r['id'], rot, 1)]
@@ -1803,6 +1878,7 @@ def build_intern(params):
                         if (schedule[did][w] == 'OP' and ip_window_ok(did, [w])
                                 and nf_adjacency_ok(did, w, rot)
                                 and sandwich_buffer_ok(did, w, rot)
+                                and ababa_no_consec(did, w, rot)
                                 and (rot != 'NF' or nf_gap_ok(did, [w]))
                                 and (rot != 'NF' or nf_block_len_ok(did, w))):
                             schedule[did][w2] = 'OP'
@@ -1819,7 +1895,10 @@ def build_intern(params):
                     cs = [r for r in residents
                           if schedule[r['id']][w] == 'OP'
                           and ip_window_ok(r['id'], [w], relaxed=True)
+                          and nf_adjacency_ok(r['id'], w, rot)
                           and sandwich_buffer_ok(r['id'], w, rot)
+                          and ababa_no_consec(r['id'], w, rot)
+                          and (rot != 'NF' or nf_gap_ok(r['id'], [w]))
                           and (rot != 'NF' or nf_block_len_ok(r['id'], w))
                           and check_max_i(r['id'], rot, 1)]
                     if not cs:
@@ -1849,7 +1928,10 @@ def build_intern(params):
                         if fixed:
                             break
                         did = donor['id']
-                        if schedule[did][w] == 'OP' and ip_window_ok(did, [w], relaxed=True) and (rot != 'NF' or nf_block_len_ok(did, w)):
+                        if (schedule[did][w] == 'OP' and ip_window_ok(did, [w], relaxed=True)
+                                and nf_adjacency_ok(did, w, rot) and sandwich_buffer_ok(did, w, rot)
+                                and ababa_no_consec(did, w, rot) and nf_gap_ok(did, [w])
+                                and (rot != 'NF' or nf_block_len_ok(did, w))):
                             schedule[did][w2] = 'OP'
                             schedule[did][w] = rot
                             coverage[rot][w2] -= 1
@@ -1919,6 +2001,10 @@ def build_intern(params):
                     v += 1
                 if w2 < TW - 1 and s[w2 + 1] in ALL_IP and s[w2 + 1] != s[w2] and s[w2 + 1] not in ('OP', 'Clinic', 'Jeopardy'):
                     v += 1
+        # ABABA consecutive: ABABA-type rotations should not have consecutive weeks
+        for w2 in range(1, TW):
+            if s[w2] in ababa_rots_intern and s[w2 - 1] == s[w2]:
+                v += 2  # Heavy penalty
         return v
 
     def get_violation_weeks(rid):
@@ -1988,6 +2074,12 @@ def build_intern(params):
                 if w2 < TW - 1 and s[w2 + 1] in ALL_IP and s[w2 + 1] != s[w2] and s[w2 + 1] not in ('OP', 'Clinic', 'Jeopardy'):
                     violation_weeks.add(w2)
                     violation_weeks.add(w2 + 1)
+
+        # ABABA consecutive violations: consecutive weeks of same ABABA rotation
+        for w2 in range(1, TW):
+            if s[w2] in ababa_rots_intern and s[w2 - 1] == s[w2]:
+                violation_weeks.add(w2)
+                violation_weeks.add(w2 - 1)
 
         return violation_weeks
 
