@@ -1342,10 +1342,8 @@ def build_intern(params):
 
     IDEAL = {
         'SLUH': sum(it_s) / max(N, 1), 'VA': sum(it_v) / max(N, 1),
-        'NF': FULL['NF'] * TW / max(N, 1), 'MICU': FULL['MICU'] * TW / max(N, 1),
-        'Cards': FULL['Cards'] * TW / max(N, 1),
     }
-    for rot in ['IP Other 1', 'IP Other 2']:
+    for rot in ['NF', 'MICU', 'Cards', 'IP Other 1', 'IP Other 2']:
         if rot in FULL:
             IDEAL[rot] = FULL[rot] * TW / max(N, 1)
 
